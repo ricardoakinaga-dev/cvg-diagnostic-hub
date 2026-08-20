@@ -1,6 +1,7 @@
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { StateStore, User } from "../domain/models";
 import { ApiError } from "../http/envelope";
+import { verifyPassword } from "./password";
 
 const SESSION_COOKIE = "cvg_session";
 const CSRF_COOKIE = "cvg_csrf";
@@ -8,14 +9,6 @@ const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function verifyPassword(password: string, encodedHash: string): boolean {
-  const [salt, expectedHex] = encodedHash.split(":");
-  if (!salt || !expectedHex) return false;
-  const actual = scryptSync(password, salt, 64);
-  const expected = Buffer.from(expectedHex, "hex");
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 function parseCookies(request: Request): Record<string, string> {

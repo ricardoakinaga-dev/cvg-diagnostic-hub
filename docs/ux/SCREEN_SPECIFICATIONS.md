@@ -98,3 +98,12 @@ Cada tela define objetivo, usuário, dados e estados. Textos são exemplos em `p
 - Users: admin/manager with delegated permission.
 - Actions: version/deactivate, never delete referenced clinical values.
 - States: validation, audit, conflict, effective date preview, permission denied.
+
+## S-11 — Centro de gestão operacional
+
+- Purpose: give a manager one scoped control surface for diagnostic flow, capacity and access decisions.
+- Navigation: Controle, Solicitações, Pendências, Estatísticas, Acessos, Catálogos and Auditoria.
+- Data: one server snapshot with active/overdue/recollection/new-result/critical counters, department rollups, pending items with next action/deep link and recent requests.
+- Scope: own department plus explicitly delegated diagnostic departments; every query and mutation is re-authorized server-side.
+- States: loading, partial/error with reconciliation, empty scope, up-to-date snapshot and stale-data warning.
+- Accessibility: named tab navigation, semantic metric/panel regions, keyboard-safe forms and no reliance on color alone for priority/status.

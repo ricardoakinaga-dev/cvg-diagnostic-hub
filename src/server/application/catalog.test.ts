@@ -30,13 +30,24 @@ describe("versioned catalog administration", () => {
       slaHours: { ROUTINE: 72, URGENT: 24, EMERGENCY: 8 },
       idempotencyKey: "catalog-create"
     });
-    await expect(service.updateDiagnosticService(manager, created.id, { name: "Tomografia", expectedVersion: 1, idempotencyKey: "catalog-manager-denied" })).rejects.toMatchObject({ code: "SCOPE_DENIED" });
+    const managerUpdated = await service.updateDiagnosticService(manager, created.id, {
+      name: "Tomografia",
+      departmentCode: "RADIOLOGY",
+      workflowType: "RADIOLOGY",
+      category: "IMAGING",
+      requiresSample: false,
+      requiresSchedule: true,
+      resultSchema: "NARRATIVE",
+      expectedVersion: 1,
+      idempotencyKey: "catalog-manager-update"
+    });
+    expect(managerUpdated.name).toBe("Tomografia");
 
-    const updated = await service.updateDiagnosticService(admin, created.id, { name: "Tomografia abdominal", active: false, expectedVersion: created.version, idempotencyKey: "catalog-update" });
+    const updated = await service.updateDiagnosticService(admin, created.id, { name: "Tomografia abdominal", active: false, expectedVersion: managerUpdated.version, idempotencyKey: "catalog-update" });
     expect(updated.active).toBe(false);
-    expect(updated.version).toBe(2);
+    expect(updated.version).toBe(3);
     expect((await service.listServices(admin, { includeInactive: true })).some((entry) => entry.id === created.id && entry.active === false)).toBe(true);
-    await expect(service.updateDiagnosticService(admin, created.id, { expectedVersion: 1, idempotencyKey: "catalog-stale" })).rejects.toMatchObject({ code: "STALE_VERSION" });
+    await expect(service.updateDiagnosticService(admin, created.id, { expectedVersion: managerUpdated.version, idempotencyKey: "catalog-stale" })).rejects.toMatchObject({ code: "STALE_VERSION" });
     expect(store.getState().auditEvents.some((event) => event.eventType === "DiagnosticServiceUpdated")).toBe(true);
   });
 
@@ -54,5 +65,27 @@ describe("versioned catalog administration", () => {
   it("does not let a care actor mutate the catalog", async () => {
     const { service, vet } = setup();
     await expect(service.createReasonCode(vet, { type: "REJECT", code: "NOPE", label: "Sem permissão", idempotencyKey: "reason-denied" })).rejects.toMatchObject({ code: "SCOPE_DENIED" });
+  });
+
+  it("rejects structural catalog changes after the service is referenced by an item", async () => {
+    const { service, admin, vet } = setup();
+    const request = await service.createRequest(vet, {
+      patientId: "patient-thor",
+      encounterId: "encounter-thor",
+      priority: "ROUTINE",
+      items: [{ serviceId: "service-hemogram" }]
+    }, { idempotencyKey: "catalog-in-use-request" });
+
+    await expect(service.updateDiagnosticService(admin, "service-hemogram", {
+      departmentCode: "RADIOLOGY",
+      workflowType: "RADIOLOGY",
+      category: "IMAGING",
+      requiresSample: false,
+      requiresSchedule: true,
+      resultSchema: "NARRATIVE",
+      expectedVersion: 1,
+      idempotencyKey: "catalog-in-use-structural"
+    })).rejects.toMatchObject({ code: "CATALOG_IN_USE" });
+    expect(request.items[0].service.code).toBe("HEMOGRAM");
   });
 });

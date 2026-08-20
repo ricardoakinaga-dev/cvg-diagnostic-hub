@@ -4,6 +4,7 @@ export interface Actor {
   id: string;
   role: RoleCode;
   departmentCode: string;
+  managedDepartmentCodes?: ReadonlyArray<string>;
   patientIds?: ReadonlyArray<string>;
   serviceCodes?: ReadonlyArray<string>;
   active?: boolean;
@@ -79,6 +80,7 @@ export const rolePermissions: Record<RoleCode, readonly Permission[]> = {
     "service.catalog.manage",
     "sla_policy.manage",
     "reason_code.manage",
+    "user_role.manage",
     "audit.view"
   ],
   VETERINARIAN: [
@@ -153,6 +155,14 @@ export const rolePermissions: Record<RoleCode, readonly Permission[]> = {
   VIEWER: commonRead
 };
 
+export function managerDepartmentCodes(actor: Pick<Actor, "departmentCode" | "managedDepartmentCodes">): string[] {
+  return Array.from(new Set([actor.departmentCode, ...(actor.managedDepartmentCodes ?? [])].map((code) => code.trim().toUpperCase()))).filter(Boolean);
+}
+
+export function managerCanAccessDepartment(actor: Pick<Actor, "departmentCode" | "managedDepartmentCodes">, departmentCode: string): boolean {
+  return managerDepartmentCodes(actor).includes(departmentCode.trim().toUpperCase());
+}
+
 export function hasPermission(role: RoleCode, permission: Permission): boolean {
   return rolePermissions[role].includes(permission);
 }
@@ -200,7 +210,7 @@ export function canAccessResource(
   }
 
   if (actor.role === "MANAGER") {
-    if (resource.departmentCode) return resource.departmentCode === actor.departmentCode;
+    if (resource.departmentCode) return managerCanAccessDepartment(actor, resource.departmentCode);
     if (resource.patientId) return false;
     return true;
   }

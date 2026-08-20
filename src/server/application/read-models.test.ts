@@ -13,9 +13,10 @@ describe("authorized read models", () => {
     if (!actor || !lab) throw new Error("fixture actors missing");
 
     const request = await service.createRequest(actor, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "URGENT", items: [{ serviceId: "service-hemogram" }, { serviceId: "service-xray" }] }, { idempotencyKey: "read-model-request" });
-    const manager = store.getState().users.find((user) => user.email === "manager@cvg.local");
+    const managerRecord = store.getState().users.find((user) => user.email === "manager@cvg.local");
     const viewer = store.getState().users.find((user) => user.email === "admin@cvg.local");
-    if (!manager || !viewer) throw new Error("management actors missing");
+    if (!managerRecord || !viewer) throw new Error("management actors missing");
+    const manager = { ...managerRecord, managedDepartmentCodes: [] };
     const services = await service.listServices(actor);
     expect(services.map((entry) => entry.code)).toContain("HEMOGRAM");
     expect((await service.listPatients(actor, "thor")).map((entry) => entry.id)).toEqual(["patient-thor"]);

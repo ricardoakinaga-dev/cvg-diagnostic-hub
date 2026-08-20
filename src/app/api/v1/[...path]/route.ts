@@ -54,11 +54,14 @@ const serviceCreateSchema = z.object({
   resultSchema: z.enum(["NUMERIC_PANEL", "NARRATIVE"]),
   slaHours: z.object({ ROUTINE: z.number().positive().max(720), URGENT: z.number().positive().max(720), EMERGENCY: z.number().positive().max(720) }).strict()
 }).strict();
-const servicePatchSchema = z.object({ name: z.string().min(1).max(120).optional(), active: z.boolean().optional(), allowsAttachment: z.boolean().optional(), slaHours: z.object({ ROUTINE: z.number().positive().max(720), URGENT: z.number().positive().max(720), EMERGENCY: z.number().positive().max(720) }).strict().optional(), expectedVersion: z.number().int().positive().optional() }).strict();
+const servicePatchSchema = z.object({ name: z.string().min(1).max(120).optional(), category: z.enum(["LABORATORY", "IMAGING"]).optional(), departmentCode: z.string().min(1).max(60).optional(), workflowType: z.enum(["LABORATORY", "RADIOLOGY", "ULTRASOUND"]).optional(), requiresSample: z.boolean().optional(), requiresSchedule: z.boolean().optional(), active: z.boolean().optional(), allowsAttachment: z.boolean().optional(), resultSchema: z.enum(["NUMERIC_PANEL", "NARRATIVE"]).optional(), slaHours: z.object({ ROUTINE: z.number().positive().max(720), URGENT: z.number().positive().max(720), EMERGENCY: z.number().positive().max(720) }).strict().optional(), expectedVersion: z.number().int().positive().optional() }).strict();
 const reasonCreateSchema = z.object({ type: z.enum(["RECOLLECTION", "CANCEL", "REJECT", "AMEND"]), code: z.string().min(2).max(60), label: z.string().min(1).max(160) }).strict();
 const reasonPatchSchema = z.object({ label: z.string().min(1).max(160).optional(), active: z.boolean().optional(), expectedVersion: z.number().int().positive().optional() }).strict();
 const reauthenticationSchema = z.object({ password: z.string().min(1).max(200) }).strict();
-const userRoleSchema = z.object({ role: z.enum(ROLES), departmentCode: z.string().min(1).max(60), active: z.boolean().optional(), expectedVersion: z.number().int().positive(), reason: z.string().min(1).max(500), confirm: z.literal(true) }).strict();
+const managedDepartmentCodesSchema = z.array(z.string().min(1).max(60)).max(20).optional();
+const userRoleSchema = z.object({ role: z.enum(ROLES), departmentCode: z.string().min(1).max(60), managedDepartmentCodes: managedDepartmentCodesSchema, active: z.boolean().optional(), expectedVersion: z.number().int().positive(), reason: z.string().min(1).max(500), confirm: z.literal(true) }).strict();
+const userCreateSchema = z.object({ email: z.string().email().max(320), displayName: z.string().min(2).max(160), password: z.string().min(12).max(200), role: z.enum(ROLES), departmentCode: z.string().min(1).max(60), managedDepartmentCodes: managedDepartmentCodesSchema, timezone: z.string().min(1).max(80), reason: z.string().min(1).max(500), confirm: z.literal(true) }).strict();
+const userDeactivateSchema = z.object({ expectedVersion: z.number().int().positive(), reason: z.string().min(1).max(500), confirm: z.literal(true) }).strict();
 
 function correlationFrom(request: Request): string {
   const supplied = request.headers.get("x-correlation-id")?.trim();
@@ -193,6 +196,18 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
     }
 
     if (path[0] === "users" && path.length === 1 && method === "GET") return responseFor(await service.listManagedUsers(actor), correlationId, id);
+    if (path[0] === "users" && path.length === 1 && method === "POST") {
+      const body = await objectBody(request);
+      const parsed = userCreateSchema.safeParse(body);
+      if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados do colaborador são inválidos.", 400);
+      return responseFor(await service.createManagedUser(actor, { ...parsed.data, ...commandMeta(request, body) }), correlationId, id, 201);
+    }
+    if (path[0] === "users" && path.length === 2 && method === "DELETE") {
+      const body = await objectBody(request);
+      const parsed = userDeactivateSchema.safeParse(body);
+      if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados de desativação são inválidos.", 400);
+      return responseFor(await service.deactivateManagedUser(actor, path[1], { ...parsed.data, ...commandMeta(request, body) }), correlationId, id);
+    }
     if (path[0] === "users" && path.length === 3 && path[2] === "roles" && method === "POST") {
       const body = await objectBody(request);
       const parsed = userRoleSchema.safeParse(body);
@@ -431,6 +446,7 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       return responseFor(data.items, correlationId, id, 200, { nextCursor: data.nextCursor, limit: data.limit, total: data.total });
     }
     if (path[0] === "dashboard" && method === "GET") return responseFor(await service.dashboard(actor), correlationId, id);
+    if (path[0] === "management" && path[1] === "overview" && method === "GET") return responseFor(await service.managementOverview(actor), correlationId, id);
     if (path[0] === "realtime" && path[1] === "events" && method === "GET") {
       if (!canAccessResource(actor, "realtime.connect", {})) throw new ApiError("SCOPE_DENIED", "Você não tem acesso ao canal em tempo real.", 404);
       return realtimeResponse(store, actor, correlationId, request.headers.get("last-event-id") ?? undefined, new URL(request.url).searchParams.get("snapshot") === "true", request);
@@ -442,8 +458,8 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
   }
 }
 
-function publicUser(user: { id: string; email: string; displayName: string; role: string; departmentCode: string; timezone: string }) {
-  return { id: user.id, email: user.email, displayName: user.displayName, role: user.role, departmentCode: user.departmentCode, timezone: user.timezone };
+function publicUser(user: { id: string; email: string; displayName: string; role: string; departmentCode: string; timezone: string; managedDepartmentCodes?: ReadonlyArray<string> }) {
+  return { id: user.id, email: user.email, displayName: user.displayName, role: user.role, departmentCode: user.departmentCode, managedDepartmentCodes: user.managedDepartmentCodes ? [...user.managedDepartmentCodes] : undefined, timezone: user.timezone };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -634,4 +650,8 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
 
 export async function PUT(request: Request, context: RouteContext): Promise<Response> {
   return dispatch("PUT", request, context);
+}
+
+export async function DELETE(request: Request, context: RouteContext): Promise<Response> {
+  return dispatch("DELETE", request, context);
 }

@@ -58,7 +58,7 @@ The following identifiers are the authorization contract used by the API specifi
 | `sla_policy.manage` | Manage SLA policies | admin/manager policy |
 | `critical_result_policy.manage` | Manage critical-result policies | admin/manager policy |
 | `reason_code.manage` | Manage reason codes | admin/manager policy |
-| `user_role.manage` | Assign/revoke user roles | admin; delegated manager requires explicit scope/owner decision |
+| `user_role.manage` | Provision, update and deactivate operational users/roles | admin or delegated manager target scope |
 | `queue.view` | View operational queue | DEPARTMENT |
 | `dashboard.view` | View operational indicators | DEPARTMENT/manager |
 | `diagnostic.timeline.view` | View patient diagnostic timeline | CARE/assigned |
@@ -74,7 +74,7 @@ The following identifiers are the authorization contract used by the API specifi
 | Role | Default responsibility | Default scope |
 | --- | --- | --- |
 | `ADMIN` | identity and system configuration | technical; no clinical command or patient scope locally |
-| `MANAGER` | operational queues, overrides, configuration delegated by policy | assigned department/site; request/item access is department-scoped |
+| `MANAGER` | operational queues, overrides, delegated configuration and collaborator access | own department plus explicitly managed diagnostic departments; request/item access is department-scoped; an `ADMIN` provisions the delegated department set |
 | `VETERINARIAN` | request, view and review for care scope | assigned patients/encounters/departments |
 | `INPATIENT_TEAM` | request/view/review for admitted patients | assigned ward/department |
 | `LAB_TECH` | receive/process/recollect/release lab work | Laboratory |
@@ -118,7 +118,7 @@ Legend: `✓` allowed within scope and state; `△` allowed only with extra cond
 | Complete item manually | △ | △ policy | — | — | — | — | — | — |
 | View audit/timeline | △ | ✓ | ✓ scope | ✓ scope | ✓ scope | ✓ scope | ✓ scope | △ |
 | Configure catalog/SLA/reasons | ✓ | △ delegated | — | — | △ proposal | △ proposal | △ proposal | — |
-| Manage users/roles | ✓ | —/△ delegated | — | — | — | — | — | — |
+| Manage users/roles | ✓, including MANAGER delegated-scope configuration | ✓ operational users in managed scope | — | — | — | — | — | — |
 | Export/delete/archive | ✓ with policy | △ approval | — | — | — | — | — | — |
 
 The matrix is a starting policy, not a claim of current hospital authorization. OQ-001/OQ-002/OQ-003/OQ-017 must be resolved before production.
@@ -132,11 +132,11 @@ The matrix is a starting policy, not a claim of current hospital authorization. 
 - `SITE`: future boundary; single-site MVP uses one configured site but does not assume multi-tenant behavior.
 - `BREAK_GLASS`: time-limited, reason-required, audited access; must not be enabled by default.
 
-The local implementation does not expose `BREAK_GLASS`. Managers can see a patient/request only when the request's requesting department or an item's executor department matches their assigned department; request views redact items outside that department, and queue/search/dashboard results are filtered at item scope.
+The local implementation does not expose `BREAK_GLASS`. Managers can see a patient/request only when the request's requesting department or an item's executor department matches their own or explicitly managed departments; request views redact items outside that department set, and queue/search/dashboard/management results are filtered at item scope.
 
 ## 5. Sensitive actions
 
-Require confirmation/reason and server version: release, amend, void, cancel after receipt/start, reject sample, override duplicate, notification acknowledgement (including critical), role/config change, export and deletion/archive. Notification acknowledgement requires `expectedVersion`, a non-empty reason, explicit `confirm: true` and an idempotency key. Role changes additionally require recent password reauthentication, `expectedVersion`, a non-empty reason and an explicit confirmation. Do not put a confirmation modal on harmless navigation or view actions.
+Require confirmation/reason and server version: release, amend, void, cancel after receipt/start, reject sample, override duplicate, notification acknowledgement (including critical), role/config change, user provisioning/deactivation, export and deletion/archive. Notification acknowledgement requires `expectedVersion`, a non-empty reason, explicit `confirm: true` and an idempotency key. User provisioning, role changes and deactivation additionally require recent password reauthentication; deactivation revokes sessions and preserves the user/audit record. Do not put a confirmation modal on harmless navigation or view actions.
 
 ## 6. Authorization failure behavior
 

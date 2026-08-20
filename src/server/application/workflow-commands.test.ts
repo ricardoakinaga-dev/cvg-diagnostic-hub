@@ -85,11 +85,14 @@ describe("workflow commands", () => {
     const released = await service.releaseResult(lab, draft.result.id, { expectedVersion: draft.result.version, idempotencyKey: "result-lifecycle-release" });
     await service.viewResult(vet, released.version.id, { idempotencyKey: "result-lifecycle-view" });
     const reviewed = await service.reviewResult(vet, released.result.id, { versionId: released.version.id, expectedVersion: released.item.version, idempotencyKey: "result-lifecycle-review" });
-    await expect(service.completeItem(manager, item.id, { expectedVersion: reviewed.item.version, idempotencyKey: "result-lifecycle-cross-department" })).rejects.toMatchObject({ code: "SCOPE_DENIED" });
-    await store.transaction((state) => ({ state: { ...state, users: state.users.map((user) => user.id === manager.id ? { ...user, departmentCode: "LABORATORY" } : user) }, result: undefined }));
+    await store.transaction((state) => ({ state: { ...state, users: state.users.map((user) => user.id === manager.id ? { ...user, managedDepartmentCodes: [] } : user) }, result: undefined }));
     const scopedManager = store.getState().users.find((user) => user.id === manager.id);
     if (!scopedManager) throw new Error("scoped manager missing");
-    const completed = await service.completeItem(scopedManager, item.id, { expectedVersion: reviewed.item.version, idempotencyKey: "result-lifecycle-complete" });
+    await expect(service.completeItem(scopedManager, item.id, { expectedVersion: reviewed.item.version, idempotencyKey: "result-lifecycle-cross-department" })).rejects.toMatchObject({ code: "SCOPE_DENIED" });
+    await store.transaction((state) => ({ state: { ...state, users: state.users.map((user) => user.id === manager.id ? { ...user, departmentCode: "LABORATORY", managedDepartmentCodes: [] } : user) }, result: undefined }));
+    const laboratoryManager = store.getState().users.find((user) => user.id === manager.id);
+    if (!laboratoryManager) throw new Error("scoped manager missing");
+    const completed = await service.completeItem(laboratoryManager, item.id, { expectedVersion: reviewed.item.version, idempotencyKey: "result-lifecycle-complete" });
     expect(completed.item.status).toBe("COMPLETED");
 
     const amended = await service.amendResult(lab, released.result.id, { reason: "Correção de unidade", narrative: "Resultado corrigido.", content: { value: 2 }, idempotencyKey: "result-lifecycle-amend" });

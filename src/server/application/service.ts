@@ -20,9 +20,10 @@ import type {
   StoreState,
   User
 } from "../domain/models";
-import { canAccessResource } from "../security/authorization";
+import { canAccessResource, managerCanAccessDepartment, managerDepartmentCodes } from "../security/authorization";
 import { ApiError } from "../http/envelope";
 import { createFileStoreFromEnv, type FileStore } from "../storage/file-store";
+import { hashPassword } from "../security/password";
 
 export interface CommandMeta {
   idempotencyKey?: string;
@@ -120,8 +121,14 @@ export interface DiagnosticServiceCreateInput extends CommandMeta {
 
 export interface DiagnosticServicePatchInput extends CommandMeta {
   name?: string;
+  category?: DiagnosticService["category"];
+  departmentCode?: string;
+  workflowType?: WorkflowType;
+  requiresSample?: boolean;
+  requiresSchedule?: boolean;
   active?: boolean;
   allowsAttachment?: boolean;
+  resultSchema?: DiagnosticService["resultSchema"];
   slaHours?: Record<Priority, number>;
 }
 
@@ -139,7 +146,26 @@ export interface ReasonCodePatchInput extends CommandMeta {
 export interface UserRoleUpdateInput extends CommandMeta {
   role: RoleCode;
   departmentCode: string;
+  managedDepartmentCodes?: string[];
   active?: boolean;
+  reason: string;
+  confirm: true;
+}
+
+export interface ManagedUserCreateInput extends CommandMeta {
+  email: string;
+  displayName: string;
+  password: string;
+  role: RoleCode;
+  departmentCode: string;
+  managedDepartmentCodes?: string[];
+  timezone: string;
+  reason: string;
+  confirm: true;
+}
+
+export interface ManagedUserDeactivateInput extends CommandMeta {
+  expectedVersion: number;
   reason: string;
   confirm: true;
 }
@@ -150,10 +176,58 @@ export interface ManagedUser {
   displayName: string;
   role: RoleCode;
   departmentCode: string;
+  managedDepartmentCodes?: ReadonlyArray<string>;
   timezone: string;
   active: boolean;
   createdAt: string;
   version: number;
+}
+
+export interface ManagementOverview {
+  asOf: string;
+  scope: { departments: string[]; label: string };
+  summary: {
+    totalRequests: number;
+    activeItems: number;
+    overdue: number;
+    recollections: number;
+    newResults: number;
+    critical: number;
+    pendingRequests: number;
+    completedToday: number;
+  };
+  departments: Array<{
+    departmentCode: string;
+    serviceCount: number;
+    totalRequests: number;
+    activeItems: number;
+    overdue: number;
+    pending: number;
+  }>;
+  pending: Array<{
+    id: string;
+    requestId: string;
+    requestCode: string;
+    patient: string;
+    service: string;
+    departmentCode: string;
+    status: ItemState;
+    priority: Priority;
+    dueAt: string;
+    overdue: boolean;
+    nextAction: string;
+    deepLink: string;
+  }>;
+  recentRequests: Array<{
+    id: string;
+    requestCode: string;
+    patient: string;
+    aggregateStatus: DiagnosticRequest["aggregateStatus"];
+    priority: Priority;
+    updatedAt: string;
+    itemCount: number;
+    deepLink: string;
+  }>;
 }
 
 export type DashboardIndicatorKey = "overdue" | "recollections" | "newResults" | "critical" | "totalActive";
@@ -345,6 +419,7 @@ function managedUser(user: User): ManagedUser {
     displayName: user.displayName,
     role: user.role,
     departmentCode: user.departmentCode,
+    managedDepartmentCodes: user.managedDepartmentCodes ? [...user.managedDepartmentCodes] : undefined,
     timezone: user.timezone,
     active: user.active !== false,
     createdAt: user.createdAt,
@@ -381,6 +456,52 @@ function requireText(value: string, field: string, maxLength: number): string {
   return normalized;
 }
 
+const operationalManagedRoles: RoleCode[] = ["VETERINARIAN", "INPATIENT_TEAM", "LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM", "VIEWER"];
+
+function canManageUserTarget(actor: User, role: RoleCode, departmentCode: string): boolean {
+  if (actor.role === "ADMIN") return true;
+  return actor.role === "MANAGER" && operationalManagedRoles.includes(role) && managerCanAccessDepartment(actor, departmentCode);
+}
+
+function normalizedEmail(value: string): string {
+  const email = requireText(value, "email", 320).toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new ApiError("VALIDATION_ERROR", "O e-mail informado é inválido.", 400);
+  return email;
+}
+
+function validatedTimezone(value: string): string {
+  const timezone = requireText(value, "timezone", 80);
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format();
+  } catch {
+    throw new ApiError("VALIDATION_ERROR", "O fuso horário informado é inválido.", 400);
+  }
+  return timezone;
+}
+
+function validatedPassword(value: string): string {
+  const password = requireText(value, "password", 200);
+  if (password.length < 12 || !/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    throw new ApiError("VALIDATION_ERROR", "A senha deve ter pelo menos 12 caracteres, letras e números.", 400);
+  }
+  return password;
+}
+
+function normalizedManagedDepartments(value: string[] | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (value.length > 20) throw new ApiError("VALIDATION_ERROR", "O colaborador não pode ter mais de 20 setores delegados.", 400);
+  const normalized = Array.from(new Set(value.map((code) => requireText(code, "managedDepartmentCode", 60).toUpperCase())));
+  if (normalized.some((code) => !/^[A-Z0-9_-]{1,60}$/.test(code))) throw new ApiError("VALIDATION_ERROR", "Um setor delegado é inválido.", 400);
+  return normalized;
+}
+
+function revokeUserSessions(state: StoreState, userId: string): StoreState["sessions"] {
+  const revokedAt = now();
+  return state.sessions.map((session) => session.userId === userId && !session.revokedAt
+    ? { ...session, revokedAt, version: session.version + 1 }
+    : session);
+}
+
 function requireRecentReauthentication(actor: User): void {
   const reauthenticatedAt = actor.reauthenticatedAt ? Date.parse(actor.reauthenticatedAt) : Number.NaN;
   if (Number.isNaN(reauthenticatedAt) || Date.now() - reauthenticatedAt > 10 * 60 * 1000 || reauthenticatedAt > Date.now() + 30_000) {
@@ -411,7 +532,7 @@ function hasServicePatientContext(state: StoreState, actor: User, patientId: str
 }
 
 function hasManagerRequestContext(state: StoreState, actor: User, request: DiagnosticRequest): boolean {
-  return request.requestingDepartmentCode === actor.departmentCode || request.itemIds.some((itemId) => itemFor(state, itemId).departmentCode === actor.departmentCode);
+  return managerCanAccessDepartment(actor, request.requestingDepartmentCode) || request.itemIds.some((itemId) => managerCanAccessDepartment(actor, itemFor(state, itemId).departmentCode));
 }
 
 function hasManagerPatientContext(state: StoreState, actor: User, patientId: string): boolean {
@@ -563,6 +684,11 @@ function validatedSlaHours(value: Record<Priority, number>): Record<Priority, nu
   return { ROUTINE: value.ROUTINE, URGENT: value.URGENT, EMERGENCY: value.EMERGENCY };
 }
 
+function validateServiceDefinition(category: DiagnosticService["category"], workflowType: WorkflowType): void {
+  const valid = (category === "LABORATORY" && workflowType === "LABORATORY") || (category === "IMAGING" && ["RADIOLOGY", "ULTRASOUND"].includes(workflowType));
+  if (!valid) throw new ApiError("VALIDATION_ERROR", "Categoria e workflow do serviço não são compatíveis.", 400);
+}
+
 function serviceFor(state: StoreState, serviceId: string): DiagnosticService {
   return findOrThrow(state.services.find((service) => service.id === serviceId && service.active), "NOT_FOUND", "Serviço diagnóstico indisponível.");
 }
@@ -660,7 +786,7 @@ function requestView(state: StoreState, request: DiagnosticRequest): RequestView
 function requestViewForActor(state: StoreState, actor: User, request: DiagnosticRequest): RequestView {
   const view = requestView(state, request);
   if (!isExecutorRole(actor) && actor.role !== "MANAGER") return view;
-  const items = view.items.filter((item) => item.departmentCode === actor.departmentCode);
+  const items = view.items.filter((item) => actor.role === "MANAGER" ? managerCanAccessDepartment(actor, item.departmentCode) : item.departmentCode === actor.departmentCode);
   return { ...view, itemIds: items.map((item) => item.id), items };
 }
 
@@ -670,7 +796,7 @@ function canViewRequest(state: StoreState, actor: User, request: DiagnosticReque
     return request.itemIds.some((itemId) => itemFor(state, itemId).departmentCode === actor.departmentCode);
   }
   if (actor.role === "MANAGER") {
-    return hasManagerRequestContext(state, actor, request) && canAccessResource(actor, "request.view", { departmentCode: actor.departmentCode });
+    return hasManagerRequestContext(state, actor, request) && canAccessResource(actor, "request.view", { departmentCode: request.requestingDepartmentCode });
   }
   return Boolean(actor.patientIds?.includes(request.patientId)) && canAccessResource(actor, "request.view", { patientId: request.patientId });
 }
@@ -739,6 +865,20 @@ function auditEventItemIds(state: StoreState, event: AuditEvent): string[] {
 
 function auditEventDepartmentCode(state: StoreState, event: AuditEvent): string | undefined {
   return auditEventItem(state, event)?.departmentCode;
+}
+
+function canViewManagementAudit(state: StoreState, actor: User, event: AuditEvent): boolean {
+  if (actor.role !== "MANAGER") return false;
+  if (event.entityType === "ReasonCode") return true;
+  if (event.entityType === "DiagnosticService") {
+    const service = state.services.find((entry) => entry.id === event.entityId);
+    return Boolean(service && managerCanAccessDepartment(actor, service.departmentCode));
+  }
+  if (event.entityType === "User") {
+    const user = state.users.find((entry) => entry.id === event.entityId);
+    return Boolean(user && canManageUserTarget(actor, user.role, user.departmentCode));
+  }
+  return false;
 }
 
 function requestForNotification(state: StoreState, notification: Notification): DiagnosticRequest | undefined {
@@ -1600,8 +1740,10 @@ export function createApplicationService(store: StateStore, dependencies: { stor
 
     async listManagedUsers(actor: User): Promise<ManagedUser[]> {
       const state = store.getState();
-      requirePermission(actor, "user_role.manage", {});
+      const currentActor = requireActiveUser(state, actor);
+      requirePermission(currentActor, "user_role.manage", {});
       return state.users
+        .filter((user) => canManageUserTarget(currentActor, user.role, user.departmentCode))
         .slice()
         .sort((left, right) => left.displayName.localeCompare(right.displayName, "pt-BR"))
         .map(managedUser);
@@ -1625,17 +1767,102 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         const departmentCode = requireText(input.departmentCode, "departmentCode", 60).toUpperCase();
         if (!/^[A-Z0-9_-]{1,60}$/.test(departmentCode)) throw new ApiError("VALIDATION_ERROR", "O departamento informado é inválido.", 400);
         const target = findOrThrow(originalState.users.find((user) => user.id === userId));
+        if (!canManageUserTarget(currentActor, target.role, target.departmentCode) || !canManageUserTarget(currentActor, input.role, departmentCode)) {
+          throw new ApiError("SCOPE_DENIED", "Você não tem acesso a este colaborador.", 404);
+        }
         ensureExpectedVersion(target.version, input.expectedVersion);
+        const managedDepartmentCodes = input.role === "MANAGER"
+          ? input.managedDepartmentCodes === undefined ? target.managedDepartmentCodes : normalizedManagedDepartments(input.managedDepartmentCodes)
+          : undefined;
+        if (input.role !== "MANAGER" && input.managedDepartmentCodes?.length) throw new ApiError("VALIDATION_ERROR", "Somente MANAGER pode ter setores delegados.", 400);
         const nextActive = input.active ?? target.active;
         if (target.role === "ADMIN" && target.active && !nextActive && originalState.users.filter((user) => user.active && user.role === "ADMIN" && user.id !== target.id).length === 0) {
           throw new ApiError("CONFLICT", "O último administrador ativo não pode ser desativado.", 409);
         }
-        const updated: User = { ...target, role: input.role, departmentCode, active: nextActive, version: target.version + 1 };
+        const updated: User = { ...target, role: input.role, departmentCode, managedDepartmentCodes, active: nextActive, version: target.version + 1 };
         const correlationId = input.correlationId ?? id("corr");
         const nextState = {
           ...originalState,
           users: originalState.users.map((user) => user.id === target.id ? updated : user),
-          auditEvents: [...originalState.auditEvents, createAudit("UserRoleUpdated", currentActor.id, "User", target.id, correlationId, `${target.role}:${target.departmentCode}:${target.active}`, `${updated.role}:${updated.departmentCode}:${updated.active}`, { reason })]
+          sessions: revokeUserSessions(originalState, target.id),
+          auditEvents: [...originalState.auditEvents, createAudit("UserRoleUpdated", currentActor.id, "User", target.id, correlationId, `${target.role}:${target.departmentCode}:${target.active}`, `${updated.role}:${updated.departmentCode}:${updated.active}`, { reason, managedDepartmentCodes: managedDepartmentCodes?.join(",") ?? "" })]
+        };
+        const result = managedUser(updated);
+        return { state: saveIdempotency(nextState, currentActor.id, scope, input.idempotencyKey, result, { userId, input }), result };
+      });
+    },
+
+    async createManagedUser(actor: User, input: ManagedUserCreateInput): Promise<ManagedUser> {
+      const scope = "POST:/users";
+      return store.transaction(async (originalState) => {
+        const currentActor = requireActiveUser(originalState, actor);
+        requireIdempotencyKey(input.idempotencyKey);
+        requirePermission(currentActor, "user_role.manage", {});
+        requireRecentReauthentication(actor);
+        if (input.confirm !== true) throw new ApiError("VALIDATION_ERROR", "A confirmação explícita da criação é obrigatória.", 400);
+        const reason = requireText(input.reason, "reason", 500);
+        const idempotent = withIdempotency<ManagedUser>(originalState, currentActor.id, scope, input.idempotencyKey, { input });
+        if (idempotent.found) return { state: originalState, result: idempotent.existing! };
+        if (!ROLES.includes(input.role)) throw new ApiError("VALIDATION_ERROR", "O role informado é inválido.", 400);
+        const departmentCode = requireText(input.departmentCode, "departmentCode", 60).toUpperCase();
+        if (!/^[A-Z0-9_-]{1,60}$/.test(departmentCode)) throw new ApiError("VALIDATION_ERROR", "O departamento informado é inválido.", 400);
+        if (!canManageUserTarget(currentActor, input.role, departmentCode)) throw new ApiError("SCOPE_DENIED", "Você não pode provisionar este tipo de colaborador neste setor.", 404);
+        const email = normalizedEmail(input.email);
+        if (originalState.users.some((user) => user.email.toLowerCase() === email)) throw new ApiError("CONFLICT", "Já existe um colaborador com este e-mail.", 409);
+        const displayName = requireText(input.displayName, "displayName", 160);
+        const password = validatedPassword(input.password);
+        const timezone = validatedTimezone(input.timezone);
+        const managedDepartmentCodes = input.role === "MANAGER" ? normalizedManagedDepartments(input.managedDepartmentCodes) : undefined;
+        if (input.role !== "MANAGER" && input.managedDepartmentCodes?.length) throw new ApiError("VALIDATION_ERROR", "Somente MANAGER pode ter setores delegados.", 400);
+        const user: User = {
+          id: id("user"),
+          email,
+          displayName,
+          role: input.role,
+          departmentCode,
+          passwordHash: hashPassword(password),
+          timezone,
+          managedDepartmentCodes,
+          createdAt: now(),
+          version: 1,
+          active: true
+        };
+        const correlationId = input.correlationId ?? id("corr");
+        const nextState = {
+          ...originalState,
+          users: [...originalState.users, user],
+          auditEvents: [...originalState.auditEvents, createAudit("UserCreated", currentActor.id, "User", user.id, correlationId, undefined, "ACTIVE", { role: user.role, departmentCode: user.departmentCode, reason })]
+        };
+        const result = managedUser(user);
+        return { state: saveIdempotency(nextState, currentActor.id, scope, input.idempotencyKey, result, { input }), result };
+      });
+    },
+
+    async deactivateManagedUser(actor: User, userId: string, input: ManagedUserDeactivateInput): Promise<ManagedUser> {
+      const scope = "DELETE:/users";
+      return store.transaction(async (originalState) => {
+        const currentActor = requireActiveUser(originalState, actor);
+        requireIdempotencyKey(input.idempotencyKey);
+        requirePermission(currentActor, "user_role.manage", {});
+        requireRecentReauthentication(actor);
+        if (input.confirm !== true) throw new ApiError("VALIDATION_ERROR", "A confirmação explícita da desativação é obrigatória.", 400);
+        const reason = requireText(input.reason, "reason", 500);
+        const idempotent = withIdempotency<ManagedUser>(originalState, currentActor.id, scope, input.idempotencyKey, { userId, input });
+        if (idempotent.found) return { state: originalState, result: idempotent.existing! };
+        if (currentActor.id === userId) throw new ApiError("VALIDATION_ERROR", "A própria sessão não pode ser desativada.", 400);
+        const target = findOrThrow(originalState.users.find((user) => user.id === userId));
+        if (!canManageUserTarget(currentActor, target.role, target.departmentCode)) throw new ApiError("SCOPE_DENIED", "Você não tem acesso a este colaborador.", 404);
+        ensureExpectedVersion(target.version, input.expectedVersion);
+        if (target.role === "ADMIN" && target.active && originalState.users.filter((user) => user.active && user.role === "ADMIN" && user.id !== target.id).length === 0) {
+          throw new ApiError("CONFLICT", "O último administrador ativo não pode ser desativado.", 409);
+        }
+        const updated: User = { ...target, active: false, version: target.version + 1 };
+        const correlationId = input.correlationId ?? id("corr");
+        const nextState = {
+          ...originalState,
+          users: originalState.users.map((user) => user.id === target.id ? updated : user),
+          sessions: revokeUserSessions(originalState, target.id),
+          auditEvents: [...originalState.auditEvents, createAudit("UserDeactivated", currentActor.id, "User", target.id, correlationId, "ACTIVE", "INACTIVE", { reason })]
         };
         const result = managedUser(updated);
         return { state: saveIdempotency(nextState, currentActor.id, scope, input.idempotencyKey, result, { userId, input }), result };
@@ -1648,7 +1875,8 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       if (includeInactive) requirePermission(actor, "service.catalog.manage", {});
       else requirePermission(actor, "service.catalog.view", {});
       return state.services
-        .filter((service) => includeInactive ? (actor.role !== "MANAGER" || service.departmentCode === actor.departmentCode) : service.active)
+        .filter((service) => actor.role !== "MANAGER" || managerCanAccessDepartment(actor, service.departmentCode))
+        .filter((service) => includeInactive || service.active)
         .map((service) => ({
         id: service.id,
         code: service.code,
@@ -1676,12 +1904,14 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         const code = requireText(input.code, "code", 60).toUpperCase();
         if (!/^[A-Z][A-Z0-9_]{1,59}$/.test(code)) throw new ApiError("VALIDATION_ERROR", "Código de serviço inválido.", 400);
         if (originalState.services.some((service) => service.code === code)) throw new ApiError("CONFLICT", "Código de serviço já utilizado.", 409);
+        validateServiceDefinition(input.category, input.workflowType);
+        const departmentCode = requireText(input.departmentCode, "departmentCode", 60).toUpperCase();
         const service: DiagnosticService = {
           id: id("service"),
           code,
           name: requireText(input.name, "name", 120),
           category: input.category,
-          departmentCode: requireText(input.departmentCode, "departmentCode", 60).toUpperCase(),
+          departmentCode,
           workflowType: input.workflowType,
           requiresSample: input.requiresSample,
           requiresSchedule: input.requiresSchedule,
@@ -1706,16 +1936,35 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         const service = findOrThrow(originalState.services.find((entry) => entry.id === serviceId));
         requirePermission(currentActor, "service.catalog.manage", { departmentCode: service.departmentCode });
         ensureExpectedVersion(service.version, input.expectedVersion);
+        const departmentCode = input.departmentCode === undefined ? service.departmentCode : requireText(input.departmentCode, "departmentCode", 60).toUpperCase();
+        if (!/^[A-Z0-9_-]{1,60}$/.test(departmentCode)) throw new ApiError("VALIDATION_ERROR", "O departamento informado é inválido.", 400);
+        requirePermission(currentActor, "service.catalog.manage", { departmentCode });
+        const category = input.category ?? service.category;
+        const workflowType = input.workflowType ?? service.workflowType;
+        const requiresSample = input.requiresSample ?? service.requiresSample;
+        const requiresSchedule = input.requiresSchedule ?? service.requiresSchedule;
+        const resultSchema = input.resultSchema ?? service.resultSchema;
+        validateServiceDefinition(category, workflowType);
+        const structuralChanged = category !== service.category || departmentCode !== service.departmentCode || workflowType !== service.workflowType || requiresSample !== service.requiresSample || requiresSchedule !== service.requiresSchedule || resultSchema !== service.resultSchema;
+        if (structuralChanged && originalState.items.some((item) => item.serviceId === service.id)) {
+          throw new ApiError("CATALOG_IN_USE", "A estrutura deste serviço já está referenciada por solicitações e não pode ser alterada.", 409);
+        }
         const updated: DiagnosticService = {
           ...service,
           name: input.name === undefined ? service.name : requireText(input.name, "name", 120),
+          category,
+          departmentCode,
+          workflowType,
+          requiresSample,
+          requiresSchedule,
           active: input.active ?? service.active,
           allowsAttachment: input.allowsAttachment ?? service.allowsAttachment,
+          resultSchema,
           slaHours: input.slaHours ? validatedSlaHours(input.slaHours) : { ...service.slaHours },
           version: service.version + 1
         };
         const correlationId = input.correlationId ?? id("corr");
-        const nextState = { ...originalState, services: originalState.services.map((entry) => entry.id === service.id ? updated : entry), auditEvents: [...originalState.auditEvents, createAudit("DiagnosticServiceUpdated", currentActor.id, "DiagnosticService", service.id, correlationId, String(service.version), String(updated.version), { active: updated.active, allowsAttachment: updated.allowsAttachment })] };
+        const nextState = { ...originalState, services: originalState.services.map((entry) => entry.id === service.id ? updated : entry), auditEvents: [...originalState.auditEvents, createAudit("DiagnosticServiceUpdated", currentActor.id, "DiagnosticService", service.id, correlationId, String(service.version), String(updated.version), { active: updated.active, departmentCode: updated.departmentCode, workflowType: updated.workflowType, allowsAttachment: updated.allowsAttachment })] };
         return { state: saveIdempotency(nextState, currentActor.id, scope, input.idempotencyKey, updated, { serviceId, input }), result: updated };
       });
     },
@@ -1779,9 +2028,9 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       const events = state.auditEvents
         .filter((event) => {
           const request = requestForAuditEvent(state, event);
-          if (!request) return actor.role === "ADMIN";
+          if (!request) return actor.role === "ADMIN" || (actor.role === "MANAGER" && canViewManagementAudit(state, actor, event));
           const eventDepartmentCode = auditEventDepartmentCode(state, event);
-          if (actor.role === "MANAGER" && eventDepartmentCode && eventDepartmentCode !== actor.departmentCode) return false;
+          if (actor.role === "MANAGER" && eventDepartmentCode && !managerCanAccessDepartment(actor, eventDepartmentCode)) return false;
           return canViewRequest(state, actor, request);
         })
         .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt) || left.id.localeCompare(right.id));
@@ -1844,7 +2093,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
           const service = serviceFor(state, item.serviceId);
           const visibleByPatient = canViewRequest(state, actor, request) || Boolean(actor.patientIds?.includes(request.patientId));
           const visibleByService = ["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode;
-          const managerItemScope = actor.role !== "MANAGER" || item.departmentCode === actor.departmentCode;
+          const managerItemScope = actor.role !== "MANAGER" || managerCanAccessDepartment(actor, item.departmentCode);
           const overdue = new Date(item.dueAt).getTime() < currentTime && !["COMPLETED", "CANCELLED", "REJECTED"].includes(item.status);
           return (visibleByPatient || visibleByService) && managerItemScope &&
             (!filters.status || item.status === filters.status) &&
@@ -1950,7 +2199,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
           const service = serviceFor(state, item.serviceId);
           const visibleByRequest = canViewRequest(state, actor, request) || actor.patientIds?.includes(request.patientId);
           const visibleByService = ["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode;
-          const managerItemScope = actor.role !== "MANAGER" || service.departmentCode === actor.departmentCode;
+          const managerItemScope = actor.role !== "MANAGER" || managerCanAccessDepartment(actor, service.departmentCode);
           const visible = Boolean(visibleByRequest || visibleByService) && managerItemScope;
           return visible && (!filters.status || item.status === filters.status) && (!departmentCode || item.departmentCode === departmentCode);
         });
@@ -2022,7 +2271,11 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       if (!request) throw new ApiError("VALIDATION_ERROR", "Informe requestId ou itemId.", 400);
       if (item && item.requestId !== request.id) throw new ApiError("NOT_FOUND", "A solicitação e o item não pertencem ao mesmo contexto.", 404);
       requireRequestPermission(state, actor, "timeline.view", request);
-      const visibleItemIds = (isExecutorRole(actor) || actor.role === "MANAGER") ? request.itemIds.filter((entryId) => itemFor(state, entryId).departmentCode === actor.departmentCode) : request.itemIds;
+      const visibleItemIds = isExecutorRole(actor)
+        ? request.itemIds.filter((entryId) => itemFor(state, entryId).departmentCode === actor.departmentCode)
+        : actor.role === "MANAGER"
+          ? request.itemIds.filter((entryId) => managerCanAccessDepartment(actor, itemFor(state, entryId).departmentCode))
+          : request.itemIds;
       const limit = pageSize(filters.limit);
       const cursor = decodeTimelineCursor(filters.cursor);
       const events = state.auditEvents
@@ -2049,7 +2302,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       const visibleItems = state.items.filter((item) => {
         const request = requestFor(state, item.requestId);
         const service = serviceFor(state, item.serviceId);
-        if (actor.role === "MANAGER") return item.departmentCode === actor.departmentCode;
+        if (actor.role === "MANAGER") return managerCanAccessDepartment(actor, item.departmentCode);
         return Boolean(actor.patientIds?.includes(request.patientId)) || (["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode);
       });
       const asOf = now();
@@ -2079,6 +2332,93 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       }));
       const window: DashboardWindow = { kind: "CURRENT_STATE", label: "Estado atual", timezone: dashboardTimezone(actor), asOf };
       return { overdue, recollections, newResults, critical, totalActive, updatedAt: asOf, window, indicators };
+    },
+
+    async managementOverview(actor: User): Promise<ManagementOverview> {
+      const state = store.getState();
+      const currentActor = requireActiveUser(state, actor);
+      if (currentActor.role !== "MANAGER") throw new ApiError("SCOPE_DENIED", "Este centro é exclusivo da gestão operacional.", 404);
+      requirePermission(currentActor, "dashboard.view", { departmentCode: currentActor.departmentCode });
+      const asOf = now();
+      const currentTime = Date.parse(asOf);
+      const terminalStatuses = new Set<ItemState>(["COMPLETED", "CANCELLED", "REJECTED"]);
+      const visibleItems = state.items
+        .filter((item) => managerCanAccessDepartment(currentActor, item.departmentCode))
+        .map((item) => ({ item, request: requestFor(state, item.requestId), service: findOrThrow(state.services.find((entry) => entry.id === item.serviceId)) }));
+      const activeItems = visibleItems.filter(({ item }) => !terminalStatuses.has(item.status));
+      const visibleRequestIds = new Set(visibleItems.map(({ request }) => request.id));
+      const overdueItems = activeItems.filter(({ item }) => Date.parse(item.dueAt) < currentTime);
+      const pendingItems = activeItems
+        .slice()
+        .sort((left, right) => {
+          const priorityRank: Record<Priority, number> = { EMERGENCY: 0, URGENT: 1, ROUTINE: 2 };
+          return priorityRank[left.item.priority] - priorityRank[right.item.priority] || left.item.dueAt.localeCompare(right.item.dueAt);
+        });
+      const critical = state.notifications.filter((notification) => {
+        if (notification.category !== "CRITICAL" || notification.state === "ACKNOWLEDGED") return false;
+        const request = requestForNotification(state, notification);
+        return Boolean(request && request.itemIds.some((itemId) => managerCanAccessDepartment(currentActor, itemFor(state, itemId).departmentCode)));
+      }).length;
+      const departments = managerDepartmentCodes(currentActor)
+        .filter((departmentCode) => state.services.some((service) => service.departmentCode === departmentCode))
+        .sort()
+        .map((departmentCode) => {
+          const departmentItems = visibleItems.filter(({ item }) => item.departmentCode === departmentCode);
+          const departmentRequests = new Set(departmentItems.map(({ request }) => request.id));
+          return {
+            departmentCode,
+            serviceCount: state.services.filter((service) => service.departmentCode === departmentCode && service.active).length,
+            totalRequests: departmentRequests.size,
+            activeItems: departmentItems.filter(({ item }) => !terminalStatuses.has(item.status)).length,
+            overdue: departmentItems.filter(({ item }) => !terminalStatuses.has(item.status) && Date.parse(item.dueAt) < currentTime).length,
+            pending: departmentItems.filter(({ item }) => !terminalStatuses.has(item.status)).length
+          };
+        });
+      const today = asOf.slice(0, 10);
+      const recentRequests = Array.from(visibleRequestIds)
+        .map((requestId) => requestFor(state, requestId))
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        .slice(0, 12)
+        .map((request) => ({
+          id: request.id,
+          requestCode: request.requestCode,
+          patient: findOrThrow(state.patients.find((patient) => patient.id === request.patientId)).displayName,
+          aggregateStatus: request.aggregateStatus,
+          priority: request.priority,
+          updatedAt: request.updatedAt,
+          itemCount: request.itemIds.filter((itemId) => managerCanAccessDepartment(currentActor, itemFor(state, itemId).departmentCode)).length,
+          deepLink: `/requests/${request.id}`
+        }));
+      return {
+        asOf,
+        scope: { departments: managerDepartmentCodes(currentActor), label: managerDepartmentCodes(currentActor).join(" · ") },
+        summary: {
+          totalRequests: visibleRequestIds.size,
+          activeItems: activeItems.length,
+          overdue: overdueItems.length,
+          recollections: visibleItems.filter(({ item }) => item.status === "RECOLLECTION_REQUIRED").length,
+          newResults: visibleItems.filter(({ item }) => item.status === "RESULT_AVAILABLE").length,
+          critical,
+          pendingRequests: new Set(activeItems.map(({ request }) => request.id)).size,
+          completedToday: visibleItems.filter(({ item }) => item.completedAt?.slice(0, 10) === today).length
+        },
+        departments,
+        pending: pendingItems.slice(0, 50).map(({ item, request, service }) => ({
+          id: item.id,
+          requestId: request.id,
+          requestCode: request.requestCode,
+          patient: findOrThrow(state.patients.find((patient) => patient.id === request.patientId)).displayName,
+          service: service.name,
+          departmentCode: item.departmentCode,
+          status: item.status,
+          priority: item.priority,
+          dueAt: item.dueAt,
+          overdue: Date.parse(item.dueAt) < currentTime,
+          nextAction: nextActionFor(item, service),
+          deepLink: `/requests/${request.id}#${item.id}`
+        })),
+        recentRequests
+      };
     }
   };
 }

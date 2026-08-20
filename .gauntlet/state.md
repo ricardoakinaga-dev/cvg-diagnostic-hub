@@ -403,3 +403,51 @@ The compatible read-only audit returned `REJECT` with five concrete local findin
 
 Decision:
 Local technical gates are green at the synthetic/local boundary. The release remains `NOT READY` for hospital use until identity/ownership, delegated-manager policy, transfer/alta, approved critical-result fallback, production AV/object storage/credentials, retention/RPO/RTO, representative workload, manual acceptance, remote CI and pilot sign-off are evidenced by responsible owners.
+
+## Round 11 — Management control center and delegated access — 2026-08-20
+
+### Goal
+
+Implement the management experience requested by the hospital operations user: delegated collaborator access administration, fully editable diagnostic catalog and auditable reason codes, and an operational control center with requests, pending work, SLA/priority/department indicators and audit visibility. Preserve the synthetic/local boundary and never hard-delete clinical or audit references.
+
+### Quality Bar v3 — frozen before implementation
+
+| ID | Dimension | Criterion | Target | Evidence method | Required | Priority | Baseline | Validity notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MGMT-1 | Collaborator access | Authorized managers/admins can create, edit, deactivate and inspect collaborators without credential leakage | Create, role/department update, soft deactivation, session revocation, optimistic version and audit all work | Service/API tests + browser flow + reload | yes | critical | Manager sees 0 users; no create/deactivate path | Hospital identity provisioning remains an external gate |
+| MGMT-2 | Authorization scope | Delegated management is scoped by role and permitted departments | Manager can manage operational collaborators only inside declared departments; cannot self-edit or elevate to technical/admin roles; technical admin remains non-clinical | Negative/positive authorization tests + route tests | yes | critical | Manager role administration absent | Fixture scope is a local demonstration of delegated policy |
+| MGMT-3 | Catalog customization | Service catalog supports safe create and structural/versioned edit | Code remains stable as an identifier; editable name, department, workflow, requirements, result schema, attachment and SLA; in-use structural changes are rejected; deactivate is retained | Application/API tests + UI form + reload | yes | critical | Only name/active/attachment/SLA editable | Clinical policy approval is not invented |
+| MGMT-4 | Auditable reasons | Reason codes support create, label edit and safe deactivation | Type/code remain stable after creation; label/active are versioned and audited | Application/API tests + UI form | yes | high | Only existing reason rows editable | Hard delete is intentionally excluded |
+| MGMT-5 | Operational control | Management home exposes actionable operational truth | Single management snapshot includes active, overdue, critical, recollection, review, department and pending request views with links to next action | API contract tests + browser screenshot/interaction | yes | critical | Manager dashboard showed clinical scope empty | Counts are synthetic and not hospital KPI approval |
+| MGMT-6 | Navigation/UX | Manager navbar matches operational responsibilities | Controle, solicitações, pendências, estatísticas, acessos, catálogos and auditoria are discoverable; loading/empty/error/partial states and keyboard semantics work | Component tests + Playwright at 3 viewports + axe | yes | high | Manager had only generic clinical/admin links | Visual review is local; manual acceptance remains required |
+| MGMT-7 | Security/data integrity | Mutations remain protected and auditable | CSRF, authentication, input schema validation, reauth for access changes, idempotency, version guards, no plaintext password/hash response, append-only audit | Security/API tests + secret scan + diff audit | yes | critical | Existing controls for previous admin role update | FHIR AuditEvent guidance informs append-only audit design |
+| MGMT-8 | Regression quality | Existing clinical flows remain green | Unit/API coverage >=80% and all prior E2E/accessibility/build/lint/type/docs gates remain green | Full verification suite and fresh artifact inspection | yes | critical | 109 unit tests, 24 E2E, 6 accessibility | No threshold lowering |
+
+### Frozen decisions
+
+- The fixture manager receives `managedDepartmentCodes` for `LABORATORY`, `RADIOLOGY` and `ULTRASOUND`; managers without that explicit list remain restricted to their own department.
+- “Excluir usuário” means soft deactivation, revocation of every active session and an append-only audit record. Historical references are retained.
+- Manager-created collaborators may use operational roles only; `ADMIN` and `MANAGER` elevation remains technical/owner-controlled.
+- The control center is an operational projection over the existing diagnostic state, not a replacement for hospital identity, transfer/alta, critical-result or retention policy.
+
+### Research basis
+
+The design uses official FHIR AuditEvent guidance for security/configuration audit records and preservation of audit integrity, and operational EHR patterns for role-based audit trails, customizable worklists and real-time actionable dashboards. Sources: https://hl7.org/fhir/R4/auditevent.html, https://blog.meditech.com/how-meditechs-approach-to-cybersecurity-ensures-safety-for-patients-providers-and-organizations, https://ehr.meditech.com/ehr-solutions/expanse-pathology.
+
+### Baseline before Round 11
+
+`git status --short --branch` was clean on `main` tracking `origin/main`; last commit was `13016ec`. Existing local evidence was 109 unit tests, 95.35% statements, 81.05% branches, 24 E2E flows, 6 accessibility flows, typecheck/lint/build/docs/OpenAPI/security/audit green. Current management defect is visible in the supplied screenshot: manager catalog/users panels are empty or partially unavailable and the navigation has no management control center.
+
+### Round 11 closure / fresh evidence — 2026-08-20
+
+Implementation:
+The management slice is complete at the synthetic/local boundary. Managers now receive explicit diagnostic department scope; the control center exposes a single server snapshot for control, requests, pending work and statistics; the manager navbar links to queues, requests, pending items, statistics, access, catalog and audit; and the administration console supports safe service/reason customization plus collaborator provisioning, versioned role changes and soft deactivation with active-session revocation. Technical roles remain unavailable to delegated managers, credentials never leave the server, and stable service/reason identifiers are protected.
+
+Fresh retest:
+`npm run test:coverage` → PASS, 119/119 tests, 94.97% statements and 80.74% branches; `npm run typecheck`, `npm run lint` and `npm run build` → PASS; full Playwright → 33/33 across Chromium/tablet/mobile, including the manager workflow and delegated manager scope configuration; accessibility → 6/6 axe/keyboard checks; `npm run validate:docs` → PASS, 56 files; `npm run validate:openapi` → PASS, 49 paths; `npm run security:scan` → PASS; `npm audit --audit-level=high --omit=dev` → 0 vulnerabilities; `git diff --check` → PASS. A fresh browser inspection found no page errors or non-SSE failed requests: the manager control center rendered the four-sector scope and the admin console rendered 4 managed collaborators, 4 services and 5 reason codes.
+
+Critic:
+Final Critic is a fresh local read-only audit of the changed management API, authorization, forms, navigation, docs and verification artifacts. It is explicitly non-independent because no callable independent reviewer/subagent was available in this harness; no external clinical or hospital approval is inferred.
+
+Decision:
+The local technical bar is complete for the requested management outcome. The release remains `NOT READY` for hospital use until external identity/ownership, delegated-manager policy approval, transfer/alta, critical-result thresholds/fallback, production AV/object storage/credentials, retention/RPO/RTO, representative workload, manual clinical/accessibility acceptance, remote CI and pilot sign-off are evidenced by responsible owners.

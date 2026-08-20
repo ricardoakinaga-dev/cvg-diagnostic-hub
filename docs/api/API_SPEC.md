@@ -46,7 +46,9 @@ List endpoints accept `limit` (default 25, max 100), opaque keyset `cursor`, `so
 | `POST /diagnostic-items/{id}/complete` | required | item version |
 | `POST /result-versions/{id}/attachments/upload-session`, `POST /attachments/{id}/finalize` | required | attachment/version state |
 | `POST /notifications/{id}/acknowledge` | required | notification version, non-empty reason and explicit confirmation |
+| `POST /users` | required | recent password reauthentication, operational role/scope validation, non-empty reason and explicit confirmation |
 | `POST /users/{id}/roles` | required | recent password reauthentication, target `expectedVersion`, non-empty reason and explicit confirmation |
+| `DELETE /users/{id}` | required | recent password reauthentication, target `expectedVersion`, non-empty reason and explicit confirmation; soft deactivation |
 
 ## 2. Resources
 
@@ -60,7 +62,8 @@ List endpoints accept `limit` (default 25, max 100), opaque keyset `cursor`, `so
 | Reports/attachments | `GET /reports/{id}`, upload session/finalize/download | result + file scope |
 | Notifications | `GET /notifications`, `POST /notifications/{id}/acknowledge` | recipient |
 | Catalog | `GET /diagnostic-services`, `GET /reason-codes`, admin commands | config permission |
-| Users and roles | `GET /users`, `POST /users/{id}/roles` | `user_role.manage` (ADMIN-only in the local boundary); credentials are never returned; role changes require reauthentication and audit |
+| Users and roles | `GET/POST /users`, `POST /users/{id}/roles`, `DELETE /users/{id}` | `user_role.manage` (ADMIN or delegated MANAGER scope); credentials are never returned; changes require reauthentication and audit; ADMIN can configure a MANAGER's `managedDepartmentCodes` |
+| Management control | `GET /management/overview` | `dashboard.view` + `user_role.manage`; one scoped snapshot for requests, pending work, departments and operational indicators |
 | Search | `GET /search` | scoped search |
 | Audit/timeline | `GET /audit-events`, `GET /timeline` | scoped/manager |
 | Health | `GET /livez`, `GET /readyz` | liveness/readiness policy |
@@ -115,7 +118,7 @@ Every endpoint below performs a server-side check for each listed canonical perm
 | `GET /diagnostic-services` | `service.catalog.view` | authenticated operational scope |
 | `GET /diagnostic-services?includeInactive=true` | `service.catalog.manage` | admin/delegated manager scope; inactive values remain visible only for configuration |
 | `POST /diagnostic-services` | `service.catalog.manage` | admin/delegated manager policy; creates a versioned catalog entry |
-| `PATCH /diagnostic-services/{id}` | `service.catalog.manage` | admin/delegated manager policy; versioned/deactivate only |
+| `PATCH /diagnostic-services/{id}` | `service.catalog.manage` | admin/delegated manager policy; all editable fields are versioned, while referenced structural changes fail safely with `CATALOG_IN_USE` |
 | `POST /sla-policies/{id}` | `sla_policy.manage` | admin/delegated manager policy |
 | `PATCH /sla-policies/{id}` | `sla_policy.manage` | admin/delegated manager policy and version guard |
 | `POST /critical-result-policies/{id}` | `critical_result_policy.manage` | admin/delegated manager policy |
@@ -123,8 +126,11 @@ Every endpoint below performs a server-side check for each listed canonical perm
 | `POST /reason-codes` | `reason_code.manage` | admin/delegated manager policy; creates an auditable code |
 | `PATCH /reason-codes/{id}` | `reason_code.manage` | admin/delegated manager policy and version guard |
 | `GET /reason-codes` | `reason_code.manage` | configuration actors only; inactive values retained for audit |
-| `GET /users` | `user_role.manage` | ADMIN-only in the local boundary; returns safe user fields only, with no password hash or credential material |
-| `POST /users/{id}/roles` | `user_role.manage` | ADMIN-only in the local boundary; recent password reauthentication, target `expectedVersion`, reason, confirmation and audit |
+| `GET /users` | `user_role.manage` | ADMIN or delegated MANAGER; only manageable users in the actor's scope; safe fields only |
+| `POST /users` | `user_role.manage` | ADMIN or delegated MANAGER; operational roles only for delegated managers; recent reauthentication, reason, confirmation and audit; ADMIN may define `managedDepartmentCodes` for a new MANAGER |
+| `POST /users/{id}/roles` | `user_role.manage` | ADMIN or delegated MANAGER target scope; recent password reauthentication, target `expectedVersion`, reason, confirmation and audit; ADMIN may revise a MANAGER's `managedDepartmentCodes` |
+| `DELETE /users/{id}` | `user_role.manage` | ADMIN or delegated MANAGER target scope; soft deactivation, session revocation, version guard and audit |
+| `GET /management/overview` | `dashboard.view`, `user_role.manage` | active MANAGER only; data is filtered to own department plus explicitly managed diagnostic departments |
 | `GET /audit-events` | `audit.view` | manager/admin or scoped audit policy |
 | `GET /livez` | `health.liveness` | platform/internal exposure policy |
 | `GET /readyz` | `health.readiness` | platform/internal exposure policy |
@@ -211,7 +217,8 @@ Result release cannot reference attachment with `PENDING`, `FAILED` or `QUARANTI
 - `GET /queues/{departmentCode}/items?...` returns action-oriented cards/table rows.
 - `GET /patients/{id}/diagnostics?cursor=` returns timeline/summary scoped to patient.
 - `GET /timeline?requestId=&itemId=&cursor=&limit=` returns event-derived entries with stable occurredAt/id keyset pagination and rejects a request/item pair from different contexts.
-- `GET /dashboard` returns the current authorized state with five indicator groups (`overdue`, `recollections`, `newResults`, `critical`, `totalActive`). Each group includes `count`, numeric `denominator`, `denominatorDefinition`, `definition` and `nextAction`; the response also includes `window.kind=CURRENT_STATE`, `window.asOf`, `window.timezone` and `updatedAt`. Manager denominators include only items in the assigned department.
+- `GET /dashboard` returns the current authorized state with five indicator groups (`overdue`, `recollections`, `newResults`, `critical`, `totalActive`). Each group includes `count`, numeric `denominator`, `denominatorDefinition`, `definition` and `nextAction`; the response also includes `window.kind=CURRENT_STATE`, `window.asOf`, `window.timezone` and `updatedAt`. Manager denominators include only items in the assigned/managed departments.
+- `GET /management/overview` returns a single scoped management snapshot: scope label, request/item counters, pending items with next action and deep link, recent requests, and department rollups. It is the data source for the manager control center tabs `Controle`, `Solicitações`, `Pendências` and `Estatísticas`.
 - `GET /search?q=&types=&status=&departmentCode=&from=&to=&cursor=&limit=` follows [`../spec/SEARCH.md`](../spec/SEARCH.md), applies authorization before ranking/counting and uses a stable rank/updatedAt/id keyset cursor.
 
 ## 9. Configuration endpoints
@@ -222,9 +229,9 @@ Administrative commands are explicit, audited and protected:
 - `POST/PATCH /sla-policies/{id}`;
 - `POST/PATCH /critical-result-policies/{id}`;
 - `POST /reason-codes` and `PATCH /reason-codes/{id}`;
-- `GET /users` and `POST /users/{id}/roles`.
+- `GET/POST /users`, `POST /users/{id}/roles` and `DELETE /users/{id}`.
 
-No endpoint allows deleting a referenced service, policy or reason; deactivate/version instead.
+No endpoint allows deleting a referenced service, policy or reason; deactivate/version instead. User deletion is also intentionally a soft deactivation: active sessions are revoked and the audit trail remains intact.
 
 ## 10. Contract requirements
 

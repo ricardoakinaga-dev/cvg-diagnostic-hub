@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Priority } from "@cvg/contracts";
 import { apiFetch, createClientUniqueId, formatRelativeTime, getSafeErrorMessage } from "./api-client";
 import { PriorityBadge, StatusBadge } from "./status-badge";
+import { ManagementDashboard } from "./management-dashboard";
 
 interface Item { id: string; status: Parameters<typeof StatusBadge>[0]["status"]; priority: Priority; dueAt: string; service: { name: string; code: string }; note?: string }
 interface Request { id: string; requestCode: string; patient: { displayName: string; species: string; sex: string; externalId: string }; priority: Priority; aggregateStatus: string; createdAt: string; items: Item[] }
@@ -83,6 +84,7 @@ export function Dashboard() {
   if (!user && !error) return <DashboardSkeleton />;
   if (error) return <div className="error-state" role="alert"><strong>{error}</strong></div>;
   if (user?.role === "ADMIN") return <TechnicalAdminDashboard displayName={user.displayName} />;
+  if (user?.role === "MANAGER") return <ManagementDashboard />;
   return <ClinicalDashboard displayName={user?.displayName ?? "Equipe"} />;
 }
 

@@ -13,6 +13,7 @@ const refresh = vi.fn();
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
+  useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({ replace, refresh }),
 }));
 
@@ -99,7 +100,7 @@ describe("AppShell", () => {
     expect(screen.queryByRole("link", { name: "Administração" })).not.toBeInTheDocument();
   });
 
-  it("keeps clinical navigation available to a manager", async () => {
+  it("exposes the operational management navigation to a manager", async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       user: {
         id: "user-management",
@@ -114,8 +115,14 @@ describe("AppShell", () => {
     render(<AppShell><div>Conteúdo da página</div></AppShell>);
 
     await screen.findByRole("navigation", { name: "Navegação principal" });
-    expect(screen.getByRole("link", { name: "Indicadores" })).toHaveAttribute("href", "/indicators");
-    expect(screen.getByRole("link", { name: "Administração" })).toHaveAttribute("href", "/admin");
+    expect(screen.getByRole("link", { name: "Central de exames" })).toHaveAttribute("href", "/queues");
+    expect(screen.getByRole("link", { name: "Solicitações" })).toHaveAttribute("href", "/management?view=requests");
+    expect(screen.getByRole("link", { name: "Pendências" })).toHaveAttribute("href", "/management?view=pending");
+    expect(screen.getByRole("link", { name: "Estatísticas" })).toHaveAttribute("href", "/management?view=stats");
+    expect(screen.getByRole("link", { name: "Acessos" })).toHaveAttribute("href", "/admin#users");
+    expect(screen.getByRole("link", { name: "Catálogos" })).toHaveAttribute("href", "/admin#catalog");
+    expect(screen.getByRole("link", { name: "Auditoria" })).toHaveAttribute("href", "/admin#audit");
+    expect(screen.queryByRole("link", { name: "Administração" })).not.toBeInTheDocument();
   });
 
   it("limits a technical administrator to the technical administration area", async () => {

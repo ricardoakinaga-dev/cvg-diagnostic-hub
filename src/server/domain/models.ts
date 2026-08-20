@@ -302,6 +302,7 @@ export function userAsActor(user: User): Actor {
     id: user.id,
     role: user.role,
     departmentCode: user.departmentCode,
+    managedDepartmentCodes: user.managedDepartmentCodes,
     patientIds: user.patientIds,
     serviceCodes: user.serviceCodes,
     active: user.active

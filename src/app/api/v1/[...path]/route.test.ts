@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { GET, PATCH, POST, PUT } from "./route";
+import { DELETE, GET, PATCH, POST, PUT } from "./route";
 import { resetRuntimeStore } from "../../../../server/store/runtime";
 import { resetMetrics } from "../../../../server/observability/metrics";
 
@@ -112,9 +112,59 @@ describe("versioned API boundary", () => {
     expect(updated.status).toBe(200);
     expect((await updated.json()).data).toMatchObject({ role: "MANAGER", version: 2 });
 
-    const vet = await login();
-    const denied = await GET(new Request("http://localhost/api/v1/users", { headers: { cookie: vet.cookie } }), params(["users"]));
+    const lab = await login("lab@cvg.local");
+    const denied = await GET(new Request("http://localhost/api/v1/users", { headers: { cookie: lab.cookie } }), params(["users"]));
     expect(denied.status).toBe(404);
+  });
+
+  it("supports delegated collaborator creation, operational overview and soft deactivation", async () => {
+    const manager = await login("manager@cvg.local");
+    const reauth = await POST(new Request("http://localhost/api/v1/session/reauth", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: manager.cookie, "x-csrf-token": manager.csrf },
+      body: JSON.stringify({ password: "api-test-password" })
+    }), params(["session", "reauth"]));
+    expect(reauth.status).toBe(200);
+
+    const created = await POST(new Request("http://localhost/api/v1/users", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: manager.cookie, "x-csrf-token": manager.csrf, "idempotency-key": "api-manager-create-user" },
+      body: JSON.stringify({ email: "api-created-lab@cvg.local", displayName: "Colaborador API", password: "api-created-password-123", role: "LAB_TECH", departmentCode: "LABORATORY", timezone: "America/Sao_Paulo", reason: "Cobertura de laboratório", confirm: true })
+    }), params(["users"]));
+    expect(created.status).toBe(201);
+    const createdBody = await created.json();
+    expect(createdBody.data).toMatchObject({ email: "api-created-lab@cvg.local", active: true });
+    expect(createdBody.data).not.toHaveProperty("passwordHash");
+
+    const overview = await GET(new Request("http://localhost/api/v1/management/overview", { headers: { cookie: manager.cookie } }), params(["management", "overview"]));
+    expect(overview.status).toBe(200);
+    expect((await overview.json()).data).toMatchObject({ summary: expect.any(Object), departments: expect.any(Array), pending: expect.any(Array) });
+
+    const deactivated = await DELETE(new Request(`http://localhost/api/v1/users/${createdBody.data.id}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json", cookie: manager.cookie, "x-csrf-token": manager.csrf, "idempotency-key": "api-manager-deactivate-user" },
+      body: JSON.stringify({ expectedVersion: createdBody.data.version, reason: "Fim do acesso API", confirm: true })
+    }), params(["users", createdBody.data.id]));
+    expect(deactivated.status).toBe(200);
+    expect((await deactivated.json()).data).toMatchObject({ id: createdBody.data.id, active: false });
+  });
+
+  it("accepts full catalog customization and rejects malformed structural data at the API boundary", async () => {
+    const manager = await login("manager@cvg.local");
+    const created = await POST(new Request("http://localhost/api/v1/diagnostic-services", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: manager.cookie, "x-csrf-token": manager.csrf, "idempotency-key": "api-manager-create-service" },
+      body: JSON.stringify({ code: "API_CUSTOM_SERVICE", name: "Serviço configurável", category: "IMAGING", departmentCode: "RADIOLOGY", workflowType: "RADIOLOGY", requiresSample: false, requiresSchedule: true, allowsAttachment: true, resultSchema: "NARRATIVE", slaHours: { ROUTINE: 48, URGENT: 12, EMERGENCY: 4 } })
+    }), params(["diagnostic-services"]));
+    expect(created.status).toBe(201);
+    const createdBody = await created.json();
+    const updated = await PATCH(new Request(`http://localhost/api/v1/diagnostic-services/${createdBody.data.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: manager.cookie, "x-csrf-token": manager.csrf, "idempotency-key": "api-manager-update-service" },
+      body: JSON.stringify({ name: "Serviço configurável revisado", category: "IMAGING", departmentCode: "ULTRASOUND", workflowType: "ULTRASOUND", requiresSample: false, requiresSchedule: true, allowsAttachment: true, resultSchema: "NARRATIVE", slaHours: { ROUTINE: 72, URGENT: 18, EMERGENCY: 6 }, expectedVersion: createdBody.data.version })
+    }), params(["diagnostic-services", createdBody.data.id]));
+    expect(updated.status).toBe(200);
+    expect((await updated.json()).data).toMatchObject({ name: "Serviço configurável revisado", departmentCode: "ULTRASOUND", workflowType: "ULTRASOUND" });
   });
 
   it("creates a request through the authenticated HTTP boundary", async () => {

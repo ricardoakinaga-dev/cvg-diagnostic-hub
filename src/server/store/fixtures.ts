@@ -1,12 +1,10 @@
-import { createHash, randomBytes, scryptSync } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { StoreState, User } from "../domain/models";
+import { hashPassword } from "../security/password";
+
+export { hashPassword } from "../security/password";
 
 const now = "2026-08-19T12:00:00.000Z";
-
-export function hashPassword(password: string, salt = randomBytes(16).toString("hex")): string {
-  const derivedKey = scryptSync(password, salt, 64).toString("hex");
-  return `${salt}:${derivedKey}`;
-}
 
 export function passwordFingerprint(password: string): string {
   return createHash("sha256").update(password).digest("hex");
@@ -34,7 +32,8 @@ function demoUser(
     serviceCodes,
     active: true,
     createdAt: now,
-    version: 1
+    version: 1,
+    ...(role === "MANAGER" ? { managedDepartmentCodes: ["LABORATORY", "RADIOLOGY", "ULTRASOUND"] } : {})
   };
 }
 

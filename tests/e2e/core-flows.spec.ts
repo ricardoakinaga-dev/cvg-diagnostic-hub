@@ -29,6 +29,101 @@ test.describe("operational hub journeys", () => {
     await expect(page.getByRole("link", { name: "Notificações" })).toHaveCount(0);
   });
 
+  test("lets an administrator configure a delegated manager scope", async ({ page }, testInfo) => {
+    const suffix = `${Date.now()}-${testInfo.project.name}`.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
+    const email = `scope-${suffix}@cvg.local`;
+
+    await signInAs(page, "admin@cvg.local", /Administração técnica/);
+    await page.goto("/admin#users");
+    const userCreate = page.locator("#users details");
+    await userCreate.locator("summary").click({ force: true });
+    await userCreate.getByLabel("Nome completo").fill("Gestor de escopo E2E");
+    await userCreate.getByLabel("E-mail institucional").fill(email);
+    await userCreate.getByLabel("Role").selectOption("MANAGER");
+    await userCreate.getByLabel("Setor", { exact: true }).fill("OPERATIONS");
+    await userCreate.getByLabel("Setores gerenciados").fill("LABORATORY, RADIOLOGY");
+    await userCreate.getByLabel("Senha inicial").fill("e2e-manager-password-123");
+    await userCreate.getByLabel("Motivo da criação").fill("Delegação operacional para teste");
+    await userCreate.getByLabel("Senha do gestor para confirmar").fill("local-demo-password");
+    await userCreate.getByLabel("Confirmo a criação deste acesso").check({ force: true });
+    await userCreate.getByRole("button", { name: "Criar acesso" }).click({ force: true });
+
+    const userRow = page.locator("#users .admin-row").filter({ hasText: email });
+    await expect(userRow).toBeVisible();
+    await expect(userRow.getByLabel("Setores gerenciados")).toHaveValue("LABORATORY, RADIOLOGY");
+    await userRow.getByLabel("Setores gerenciados").fill("ULTRASOUND");
+    await userRow.getByLabel("Motivo da alteração").fill("Revisão do escopo operacional");
+    await userRow.getByLabel("Senha para reautenticar").fill("local-demo-password");
+    await userRow.getByLabel("Confirmo esta alteração de acesso").check({ force: true });
+    await userRow.getByRole("button", { name: `Salvar ${email}` }).click({ force: true });
+    await expect(userRow.getByLabel("Setores gerenciados")).toHaveValue("ULTRASOUND");
+  });
+
+  test("gives a manager scoped control, catalog and collaborator workflows", async ({ page }, testInfo) => {
+    const suffix = `${Date.now()}-${testInfo.project.name}`.replace(/[^a-z0-9-]/gi, "-").toLowerCase();
+    const serviceCode = `E2E_${suffix.replaceAll("-", "_")}`.toUpperCase();
+    const reasonCode = `E2E_${suffix.replaceAll("-", "_")}`.toUpperCase();
+    const email = `e2e-${suffix}@cvg.local`;
+
+    await signInAs(page, "manager@cvg.local", /Controle operacional/);
+    const mainNavigation = page.getByRole("navigation", { name: "Navegação principal" });
+    await expect(mainNavigation.getByRole("link", { name: "Solicitações" })).toBeVisible();
+    await expect(mainNavigation.getByRole("link", { name: "Pendências" })).toBeVisible();
+    await expect(mainNavigation.getByRole("link", { name: "Estatísticas" })).toBeVisible();
+
+    await mainNavigation.getByRole("link", { name: "Catálogos" }).click({ force: true });
+    await expect(page).toHaveURL(/\/admin#catalog/);
+    await expect(page.getByRole("heading", { name: "Serviços diagnósticos" })).toBeVisible();
+    const serviceCreate = page.locator("#catalog details");
+    await serviceCreate.locator("summary").click({ force: true });
+    await serviceCreate.getByLabel("Código").fill(serviceCode);
+    await serviceCreate.getByLabel("Nome").fill("Painel operacional E2E");
+    await serviceCreate.getByLabel("Setor").fill("LABORATORY");
+    await serviceCreate.getByLabel("Workflow").selectOption("LABORATORY");
+    await serviceCreate.getByLabel("Exige agenda").check({ force: true });
+    await serviceCreate.getByLabel("SLA urgente (h)").fill("6");
+    await serviceCreate.getByRole("button", { name: "Criar serviço" }).click({ force: true });
+    const serviceRow = page.locator("#catalog .admin-row").filter({ hasText: serviceCode });
+    await expect(serviceRow).toBeVisible();
+    await serviceRow.getByLabel("Nome").fill("Painel operacional E2E revisado");
+    await serviceRow.getByLabel("SLA emergência (h)").fill("3");
+    await serviceRow.getByRole("button", { name: /Salvar/ }).click({ force: true });
+    await expect(serviceRow.getByLabel("Nome")).toHaveValue("Painel operacional E2E revisado");
+
+    await page.goto("/admin#reasons");
+    const reasonCreate = page.locator("#reasons details");
+    await reasonCreate.locator("summary").click({ force: true });
+    await reasonCreate.getByLabel("Tipo").selectOption("RECOLLECTION");
+    await reasonCreate.getByLabel("Código").fill(reasonCode);
+    await reasonCreate.getByLabel("Descrição").fill("Motivo operacional E2E");
+    await reasonCreate.getByRole("button", { name: "Criar motivo" }).click({ force: true });
+    const reasonRow = page.locator("#reasons .admin-row").filter({ hasText: reasonCode });
+    await expect(reasonRow).toBeVisible();
+    await reasonRow.getByLabel("Descrição").fill("Motivo operacional E2E revisado");
+    await reasonRow.getByRole("button", { name: `Salvar ${reasonCode}` }).click({ force: true });
+    await expect(reasonRow.getByLabel("Descrição")).toHaveValue("Motivo operacional E2E revisado");
+
+    await page.goto("/admin#users");
+    const userCreate = page.locator("#users details");
+    await userCreate.locator("summary").click({ force: true });
+    await userCreate.getByLabel("Nome completo").fill("Colaborador E2E");
+    await userCreate.getByLabel("E-mail institucional").fill(email);
+    await userCreate.getByLabel("Role").selectOption("LAB_TECH");
+    await userCreate.getByLabel("Setor").fill("LABORATORY");
+    await userCreate.getByLabel("Senha inicial").fill("e2e-collaborator-123");
+    await userCreate.getByLabel("Motivo da criação").fill("Teste operacional de provisionamento");
+    await userCreate.getByLabel("Senha do gestor para confirmar").fill("local-demo-password");
+    await userCreate.getByLabel("Confirmo a criação deste acesso").check({ force: true });
+    await userCreate.getByRole("button", { name: "Criar acesso" }).click({ force: true });
+    const userRow = page.locator("#users .admin-row").filter({ hasText: email });
+    await expect(userRow).toBeVisible();
+    await userRow.getByLabel("Motivo da alteração").fill("Encerramento do teste operacional");
+    await userRow.getByLabel("Senha para reautenticar").fill("local-demo-password");
+    await userRow.getByLabel("Confirmo esta alteração de acesso").check({ force: true });
+    await userRow.getByRole("button", { name: "Desativar acesso" }).click({ force: true });
+    await expect(userRow).toContainText("Desativado");
+  });
+
   test("creates a contextual multi-service request through the UI", async ({ page }, testInfo) => {
     const scenario = {
       chromium: { patient: "patient-thor", services: ["Hemograma", "RX de tórax"] },

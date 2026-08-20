@@ -74,3 +74,21 @@ A specialized reviewer profile was rejected by the account harness because its f
 
 Decision:
 Local implementation evidence is green at the synthetic boundary, but the release remains `NOT READY` for hospital use. Critical-result fallback/escalation, transfer/alta/ownership, production AV/object storage/credentials, approved retention/RPO/RTO, representative hospital load, manual accessibility/clinical acceptance, remote CI and pilot sign-off remain conditional or blocked external gates.
+
+## Round 11 — Management control center and delegated access — 2026-08-20
+
+- Goal: deliver scoped collaborator administration, full safe catalog/reason customization, and an operational management control center without weakening the existing clinical/security boundary.
+- Phase: DEFINE_BAR → TEST_FIRST → BUILD → RUN → INSPECT → CRITIQUE → FIX → RETEST
+- Frozen bar: `MGMT-1` through `MGMT-8` in `.gauntlet/state.md`.
+- Baseline: clean `main` at `13016ec`; manager currently has no user-management permission, sees no diagnostic catalog because its department is `INPATIENT`, and has no management-specific navbar/control center.
+- Safety decisions: manager scope is explicit through `managedDepartmentCodes`; user removal is soft deactivation plus session revocation and audit; catalog identifiers and reason codes remain stable after creation.
+- Evidence pending: red tests, implementation, full unit/coverage/typecheck/lint/build/docs/OpenAPI/security gates, three-viewport Playwright and accessibility, real-browser network/console inspection, fresh read-only critique, commit and push.
+
+### Round 11 closure — 2026-08-20
+
+- Implemented scoped manager control center, operational navbar, delegated collaborator create/update/soft-deactivate, service catalog customization, auditable reason customization, session revocation, and append-only audit visibility.
+- Verification: 119 unit/integration tests; 94.97% statements; 80.74% branches; typecheck/lint/build PASS; 33/33 Playwright across desktop/tablet/mobile; accessibility 6/6; docs 56 files; OpenAPI 49 paths; secret scan PASS; production dependency audit 0 vulnerabilities; diff check PASS.
+- Browser evidence: manager scope rendered `INPATIENT · LABORATORY · RADIOLOGY · ULTRASOUND`; admin console rendered 4 scoped collaborators, 4 services and 5 reason codes; no page errors or non-SSE failed requests were observed.
+- Fixes during critique: scoped manager fixtures, UI role filtering, catalog-code client validation, and version-keyed collaborator rows so server-side deactivation immediately renders `Desativado` after reload.
+- Critic status: fresh local read-only audit completed; non-independent because no callable independent reviewer/subagent was available in this harness. Final verdict is `CONDITIONAL PASS` for local synthetic scope only.
+- Remaining external gates: hospital IdP/ownership and delegated-manager approval, transfer/alta, critical-result policy/fallback, production AV/object storage/credentials, retention/RPO/RTO, representative workload, manual clinical/accessibility acceptance, remote CI and pilot sign-off.
