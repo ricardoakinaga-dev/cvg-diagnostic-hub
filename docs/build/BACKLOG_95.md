@@ -4,7 +4,7 @@
 **Fonte:** [`QUALITY_SCORECARD_95.md`](QUALITY_SCORECARD_95.md) e [`ROADMAP_95.md`](ROADMAP_95.md).  
 **Regra:** `DONE` significa implementado e verificado localmente; `CONDITIONAL` significa tecnicamente pronto, mas dependente de ambiente externo; `BLOCKED` significa que implementar a decisão sem owner seria inseguro.
 
-**Fechamento local W5/W6 (20/08/2026):** os itens técnicos foram verificados novamente no artefato servido. A evidência consolidada é `npm run validate` (93 testes; 94,39% statements; 80,3% branches), build/start, Playwright 21/21, acessibilidade 6/6, OpenAPI 44 paths, docs 56 arquivos, PostgreSQL/restore (`1|18|9`), perf smoke sem erros com p95 134,54 ms e secret/audit scans limpos. `CONDITIONAL` e `BLOCKED EXTERNAL` permanecem gates de ambiente, política ou aceite; não representam aprovação hospitalar.
+**Fechamento local W5/W6 (20/08/2026):** os itens técnicos foram verificados novamente no artefato servido. A evidência consolidada é `npm run test:coverage` (107 testes; 95,4% statements; 81,01% branches), typecheck/lint/build, Playwright 21/21, acessibilidade 6/6, OpenAPI 47 paths, docs 56 arquivos, PostgreSQL/restore (`1|26|13`), perf smoke em quatro rotas no `next start` (400 requests, 0 erros, p95 máximo 434,69 ms contra alvo de 500 ms) e secret/audit scans limpos. `CONDITIONAL` e `BLOCKED EXTERNAL` permanecem gates de ambiente, política ou aceite; não representam aprovação hospitalar.
 
 | ID | Onda | Scorecard | Entrega | Critério de aceite | Teste/evidência | Estado |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -19,7 +19,7 @@
 | G95-OBS-002 | W3 | BUILD-1/8 | Readiness verifica DB e storage | `/readyz` diferencia falha e não inicializa liveness | route + DB smoke | DONE |
 | G95-STO-001 | W3 | BUILD-8 | Adapter S3-compatible e factory por ambiente | MinIO/local têm contrato comum; chave é segura | unit + MinIO opcional | CONDITIONAL |
 | G95-SEC-001 | W3 | BUILD-5/10 | Secret scan e configuração segura | nenhum segredo real no código; placeholders detectados | script + audit | DONE |
-| G95-API-002 | W3 | BUILD-2/12 | Publicar OpenAPI mínimo verificável | paths e schemas principais refletem rotas reais | validator | DONE |
+| G95-API-002 | W3 | BUILD-2/12 | Publicar OpenAPI mínimo verificável | paths e schemas principais refletem rotas reais, inclusive dashboard e administração de roles | validator | DONE |
 | G95-OPS-001 | W4 | BUILD-11 | Smoke de backup e restore em banco descartável | dump restaura e relações essenciais existem | script Docker/DB | CONDITIONAL |
 | G95-OPS-002 | W4 | BUILD-1/10/11 | Workflow CI reproduz gates locais | CI roda install, docs, typecheck, lint, test, build | revisão YAML | CONDITIONAL |
 | G95-PERF-001 | W4 | BUILD-8/11 | Perf smoke com p50/p95/p99 e erro | benchmark reproduzível com alvo explícito | script servido | CONDITIONAL |

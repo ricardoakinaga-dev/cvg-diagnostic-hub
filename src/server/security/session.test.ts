@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDemoState } from "../store/fixtures";
 import { MemoryStore } from "../store/memory-store";
-import { assertCsrf, authenticateRequest, loginUser, revokeSession } from "./session";
+import { assertCsrf, authenticateRequest, loginUser, reauthenticateUser, revokeSession } from "./session";
 
 describe("secure server sessions", () => {
   it("creates an opaque session and authenticates it through a cookie", async () => {
@@ -25,6 +25,19 @@ describe("secure server sessions", () => {
     await expect(
       authenticateRequest(store, new Request("http://localhost", { headers: { cookie: `cvg_session=${login.sessionToken}` } }))
     ).rejects.toMatchObject({ code: "SESSION_EXPIRED", status: 401 });
+  });
+
+  it("records a recent password reauthentication on the opaque session", async () => {
+    const store = new MemoryStore(createDemoState("test-password"));
+    const login = await loginUser(store, "admin@cvg.local", "test-password");
+    const request = new Request("http://localhost/api/v1/session/reauth", {
+      headers: { cookie: `cvg_session=${login.sessionToken}` }
+    });
+
+    const reauthenticated = await reauthenticateUser(store, request, "test-password");
+    expect(reauthenticated.reauthenticatedAt).toEqual(expect.any(String));
+    expect((await authenticateRequest(store, request)).reauthenticatedAt).toBe(reauthenticated.reauthenticatedAt);
+    await expect(reauthenticateUser(store, request, "wrong-password")).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
   });
 
   it("requires the double-submit CSRF token for cookie-authenticated mutations", async () => {

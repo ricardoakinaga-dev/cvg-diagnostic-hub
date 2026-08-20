@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { ROLES, type RoleCode } from "@cvg/contracts";
 import { ApiClientError, apiFetch, getSafeErrorMessage } from "./api-client";
 
 interface CatalogService {
@@ -24,9 +25,22 @@ interface ReasonCode {
   version: number;
 }
 
+interface ManagedUser {
+  id: string;
+  email: string;
+  displayName: string;
+  role: RoleCode;
+  departmentCode: string;
+  active: boolean;
+  timezone: string;
+  createdAt: string;
+  version: number;
+}
+
 export function AdminConsole() {
   const [services, setServices] = useState<CatalogService[]>([]);
   const [reasons, setReasons] = useState<ReasonCode[]>([]);
+  const [users, setUsers] = useState<ManagedUser[]>([]);
   const [error, setError] = useState("");
   const [accessDenied, setAccessDenied] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -35,14 +49,17 @@ export function AdminConsole() {
     setLoading(true);
     setError("");
     setAccessDenied(false);
-    const [serviceResult, reasonResult] = await Promise.allSettled([
+    const [serviceResult, reasonResult, userResult] = await Promise.allSettled([
       apiFetch<CatalogService[]>("/diagnostic-services?includeInactive=true"),
       apiFetch<ReasonCode[]>("/reason-codes"),
+      apiFetch<ManagedUser[]>("/users"),
     ]);
     if (serviceResult.status === "fulfilled") setServices(serviceResult.value);
     if (reasonResult.status === "fulfilled") setReasons(reasonResult.value);
-    const failures = [serviceResult, reasonResult].filter((result) => result.status === "rejected");
-    const denied = failures.length === 2 && failures.every((result) => result.status === "rejected" && result.reason instanceof ApiClientError && result.reason.code === "SCOPE_DENIED");
+    if (userResult.status === "fulfilled") setUsers(userResult.value);
+    const results = [serviceResult, reasonResult, userResult];
+    const failures = results.filter((result) => result.status === "rejected");
+    const denied = failures.length === results.length && failures.every((result) => result.status === "rejected" && result.reason instanceof ApiClientError && result.reason.code === "SCOPE_DENIED");
     setAccessDenied(denied);
     if (failures.length > 0 && !denied) setError("Parte da configuração está indisponível; alterações não confirmadas permanecem sem efeito.");
     setLoading(false);
@@ -50,7 +67,7 @@ export function AdminConsole() {
 
   useEffect(() => { const timer = window.setTimeout(() => { void load(); }, 0); return () => window.clearTimeout(timer); }, [load]);
 
-  if (loading && services.length === 0 && reasons.length === 0) return <div className="loading-state" role="status">Carregando administração…</div>;
+  if (loading && services.length === 0 && reasons.length === 0 && users.length === 0) return <div className="loading-state" role="status">Carregando administração…</div>;
 
   return (
     <div className="admin-page">
@@ -60,6 +77,7 @@ export function AdminConsole() {
       <div className="admin-columns">
         <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Catálogo</p><h2>Serviços diagnósticos</h2></div><span className="timeline-count">{services.length}</span></div>{services.length === 0 ? <div className="empty-state"><span aria-hidden="true">✓</span><strong>Nenhum serviço no escopo de gestão</strong><p>O catálogo só mostra serviços administráveis para este setor.</p></div> : <div className="admin-list">{services.map((service) => <ServiceRow key={service.id} service={service} onSaved={() => void load()} />)}</div>}</section>
         <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Motivos auditáveis</p><h2>Códigos de motivo</h2></div><span className="timeline-count">{reasons.length}</span></div>{reasons.length === 0 ? <div className="empty-state"><span aria-hidden="true">✓</span><strong>Nenhum motivo configurado</strong><p>Novos códigos devem ser aprovados antes de serem usados em comandos.</p></div> : <div className="admin-list">{reasons.map((reason) => <ReasonRow key={reason.id} reason={reason} onSaved={() => void load()} />)}</div>}</section>
+        <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Acesso institucional</p><h2>Usuários e roles</h2></div><span className="timeline-count">{users.length}</span></div>{users.length === 0 ? <div className="empty-state"><span aria-hidden="true">✓</span><strong>Nenhum usuário no escopo de gestão</strong><p>Identidades são provisionadas pelo sistema institucional; aqui apenas o acesso operacional é versionado.</p></div> : <div className="admin-list">{users.map((user) => <UserRow key={user.id} user={user} onSaved={() => void load()} />)}</div>}</section>
       </div>
     </div>
   );
@@ -109,4 +127,35 @@ function ReasonRow({ reason, onSaved }: { reason: ReasonCode; onSaved: () => voi
   }
 
   return <form className="admin-row" onSubmit={(event) => void save(event)}><div className="admin-row-heading"><strong>{reason.code}</strong><span className={active ? "text-success" : "text-danger"}>{active ? "Ativo" : "Desativado"}</span></div><small>{reason.type} · v{reason.version}</small><label>Descrição<input value={label} onChange={(event) => setLabel(event.target.value)} maxLength={160} /></label><label className="admin-check"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /> Disponível para seleção</label>{error && <p className="form-alert" role="alert">{error}</p>}<button className="button button-ghost" type="submit" disabled={busy}>{busy ? "Salvando…" : `Salvar ${reason.code}`}</button></form>;
+}
+
+function UserRow({ user, onSaved }: { user: ManagedUser; onSaved: () => void }) {
+  const [role, setRole] = useState<RoleCode>(user.role);
+  const [departmentCode, setDepartmentCode] = useState(user.departmentCode);
+  const [active, setActive] = useState(user.active);
+  const [reason, setReason] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function save(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await apiFetch("/session/reauth", { method: "POST", body: JSON.stringify({ password }) });
+      await apiFetch(`/users/${user.id}/roles`, {
+        method: "POST",
+        body: JSON.stringify({ role, departmentCode: departmentCode.trim(), active, expectedVersion: user.version, reason: reason.trim(), confirm: true }),
+      });
+      onSaved();
+    } catch (cause) {
+      setError(getSafeErrorMessage(cause, "Não foi possível salvar a role."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <form className="admin-row" onSubmit={(event) => void save(event)}><div className="admin-row-heading"><strong>{user.displayName}</strong><span className={active ? "text-success" : "text-danger"}>{active ? "Ativo" : "Desativado"}</span></div><small>{user.email} · v{user.version} · {user.timezone}</small><div className="admin-role-grid"><label>Role<select value={role} onChange={(event) => setRole(event.target.value as RoleCode)}>{ROLES.map((option) => <option key={option} value={option}>{option}</option>)}</select></label><label>Setor<input value={departmentCode} onChange={(event) => setDepartmentCode(event.target.value)} maxLength={60} /></label></div><label className="admin-check"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /> Acesso operacional ativo</label><label>Motivo da alteração<input value={reason} onChange={(event) => setReason(event.target.value)} maxLength={500} required /></label><label>Senha para reautenticar<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" maxLength={200} required /></label><label className="admin-check"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /> Confirmo esta alteração de acesso</label>{error && <p className="form-alert" role="alert">{error}</p>}<button className="button button-ghost" type="submit" disabled={busy || !reason.trim() || !password || !confirmed}>{busy ? "Salvando…" : `Salvar ${user.email}`}</button></form>;
 }

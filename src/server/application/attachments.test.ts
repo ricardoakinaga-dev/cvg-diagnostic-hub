@@ -19,7 +19,7 @@ async function setup() {
   const started = await service.startProcedure(imaging, request.items[0].id, { idempotencyKey: `attachment-start-${Date.now()}` });
   await service.markProcedurePerformed(imaging, request.items[0].id, { expectedVersion: started.item.version, idempotencyKey: `attachment-performed-${Date.now()}` });
   const draft = await service.createResultDraft(imaging, request.items[0].id, { narrative: "Laudo com imagem.", content: { impression: "Sem alterações" }, idempotencyKey: `attachment-draft-${Date.now()}` });
-  return { root, store, service, actor, imaging, versionId: draft.version.id };
+  return { root, store, service, actor, imaging, requestId: request.id, versionId: draft.version.id };
 }
 
 describe("secure attachment lifecycle", () => {
@@ -39,6 +39,7 @@ describe("secure attachment lifecycle", () => {
       expect(finalized.attachment).not.toHaveProperty("storageKey");
       const resultId = context.store.getState().results[0].id;
       await context.service.releaseResult(context.imaging, resultId, { idempotencyKey: "release-after-attachment" });
+      expect((await context.service.timeline(context.actor, context.requestId)).items.some((event) => event.entityType === "Attachment")).toBe(true);
       const downloaded = await context.service.downloadAttachment(context.actor, session.attachment.id);
       expect(downloaded.content.equals(content)).toBe(true);
     } finally {

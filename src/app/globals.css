@@ -112,6 +112,10 @@ em { color: var(--teal); font-family: var(--font-display); font-weight: 400; }
 .button-ghost { border-color: var(--line-strong); color: var(--ink-soft); background: var(--surface); }
 .button-ghost:hover:not(:disabled) { border-color: var(--teal); color: var(--teal-dark); }
 .button-wide { width: 100%; min-height: 48px; }
+.notification-confirmation { display: grid; min-width: 180px; gap: 6px; }
+.notification-confirmation label { color: var(--ink-soft); font-size: 10px; font-weight: 700; }
+.notification-confirmation input:not([type="checkbox"]) { min-height: 32px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink); background: var(--surface); font-size: 11px; }
+.notification-confirmation label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 5px; font-weight: 600; }
 
 .search-bar { position: relative; display: flex; align-items: center; gap: 11px; height: 49px; margin-bottom: 27px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-sm); }
 .search-bar > span { color: var(--ink-faint); font-size: 24px; line-height: 1; }
@@ -338,6 +342,7 @@ em { color: var(--teal); font-family: var(--font-display); font-weight: 400; }
 .indicator-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: -16px 0 16px; color: var(--ink-faint); font-size: 10px; }
 .indicator-meta span + span { padding-left: 18px; border-left: 1px solid var(--line-strong); }
 .indicator-columns, .admin-columns { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); gap: 14px; margin-top: 14px; }
+.admin-columns { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .indicator-list, .admin-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .indicator-list li { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 22px; border-top: 1px solid var(--line); }
 .indicator-list li > span:first-child { display: grid; gap: 2px; min-width: 0; }
@@ -345,6 +350,10 @@ em { color: var(--teal); font-family: var(--font-display); font-weight: 400; }
 .indicator-list small { color: var(--ink-faint); font-size: 10px; }
 .indicator-copy { display: grid; gap: 13px; padding: 0 22px 22px; color: var(--ink-soft); font-size: 11px; }
 .indicator-copy strong { color: var(--ink); }
+.indicator-definition-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.indicator-definition-list li { display: grid; gap: 4px; padding-bottom: 11px; border-bottom: 1px solid var(--line); }
+.indicator-definition-list p { margin: 0; }
+.indicator-definition-list small { color: var(--ink-faint); font-size: 10px; line-height: 1.5; }
 .indicator-muted { padding-top: 12px; border-top: 1px solid var(--line); color: var(--ink-faint); }
 .text-success { color: #23755d; }
 .text-danger { color: #a6493e; }
@@ -358,6 +367,9 @@ em { color: var(--teal); font-family: var(--font-display); font-weight: 400; }
 .admin-row label { display: grid; gap: 4px; color: var(--ink); font-size: 10px; font-weight: 800; }
 .admin-row input:not([type="checkbox"]) { height: 35px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: white; font-size: 11px; }
 .admin-row input:not([type="checkbox"]):focus { border-color: var(--teal); outline: 2px solid rgb(12 141 131 / 15%); }
+.admin-row select { height: 35px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--ink); background: white; font-size: 11px; }
+.admin-row select:focus { border-color: var(--teal); outline: 2px solid rgb(12 141 131 / 15%); }
+.admin-role-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .admin-check { display: flex !important; grid-template-columns: none !important; align-items: center; gap: 7px !important; font-weight: 600 !important; }
 .admin-check input { accent-color: var(--teal); }
 .admin-sla { display: grid; gap: 2px; padding: 8px 9px; border-radius: 7px; background: var(--paper); }

@@ -6,7 +6,7 @@ Status: `NOT READY` until implementation, operational validation and human gates
 
 ## Local MVP evidence (20/08/2026)
 
-The local synthetic artifact has executable evidence for session/RBAC/CSRF/scope, API envelopes and health, core Lab/RX/US/result/file flows, incremental PostgreSQL migration/seed/smoke, 93 automated Vitest tests, 94.39% statement coverage, 80.3% branch coverage, 21 Playwright E2E runs across desktop/tablet/mobile, an explicit 6/6 accessibility suite, bounded metrics, S3/MinIO adapter, restore smoke (`1|18|9`), perf smoke with 0 errors and p95 134.54 ms against a 500 ms target, OpenAPI validation (44 paths), secret scan and a clean high-severity npm audit. This evidence does not check any release box by itself.
+The local synthetic artifact has executable evidence for session/RBAC/CSRF/scope, API envelopes and health, core Lab/RX/US/result/file flows, scoped search/filter/timeline/dashboard contracts, ADMIN-only versioned role administration with recent re-authentication, incremental PostgreSQL migration/seed/smoke, 107 automated Vitest tests, 95.4% statement coverage, 81.01% branch coverage, 21 Playwright E2E runs across desktop/tablet/mobile, an explicit 6/6 accessibility suite, bounded metrics, S3/MinIO adapter, restore smoke (`1|26|13`), a four-route perf smoke on `next start` with 400 requests, 0 errors and maximum route p95 434.69 ms against a 500 ms target, OpenAPI validation (47 paths), secret scan and a clean high-severity npm audit. This evidence does not check any release box by itself.
 
 The remaining release blockers are explicit: hospital identity/ownership and transfer/alta policy, approved critical-result/fallback policy, production object storage/AV/credentials, representative hospital workload, manual accessibility/clinical acceptance, approved RPO/RTO and retention, remote CI execution and pilot sign-off. The local technical boundaries are implemented; the blockers are not silently marked as production-ready.
 
@@ -28,7 +28,7 @@ The remaining release blockers are explicit: hospital identity/ownership and tra
 ## Reliability/operations
 
 - [ ] Migrations tested from representative prior version; rollback/roll-forward plan.
-- [ ] PostgreSQL + object storage backups verified and restore drill passed against approved RPO/RTO.
+- [ ] PostgreSQL + object storage backups verified and restore drill passed against approved RPO/RTO. Local evidence covers PostgreSQL only; object storage and RPO/RTO remain external.
 - [ ] `/livez`, `/readyz`, logs, metrics, correlation, outbox retry/dead letter and alert routing tested.
 - [ ] Storage scan/quarantine and signed downloads work.
 - [ ] Incident, critical notification and degraded-network runbooks rehearsed.
@@ -38,7 +38,7 @@ The remaining release blockers are explicit: hospital identity/ownership and tra
 - [ ] Unit/integration/API/E2E/accessibility/security suite passes; business coverage ≥80%.
 - [ ] Responsive desktop/tablet/mobile critical states inspected.
 - [ ] Loading, empty, partial, error, offline/degraded and permission denied flows verified.
-- [ ] Performance targets measured with representative data/concurrency.
+- [ ] Performance targets measured with representative hospital data/concurrency. Local evidence covers four synthetic read workloads at concurrency 10; it is not representative-load sign-off.
 - [ ] No fake implementation, silent error, critical pending item or unowned alert.
 
 ## Deployment

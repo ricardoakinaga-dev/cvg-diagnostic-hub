@@ -94,6 +94,7 @@ describe("diagnostic application service", () => {
     expect(recollection.sample.status).toBe("REJECTED");
     expect(recollection.replacement.replacesSampleId).toBe(received.sample.id);
     expect(recollection.items.every((item) => item.status === "RECOLLECTION_REQUIRED")).toBe(true);
+    expect((await service.timeline(actor, request.id)).items.some((event) => event.entityType === "Sample")).toBe(true);
   });
 
   it("releases once, records notifications, and rejects stale review", async () => {
@@ -141,6 +142,7 @@ describe("diagnostic application service", () => {
     expect((await service.listResultVersions(actor, released.result.id))).toHaveLength(1);
     expect(store.getState().notifications).toHaveLength(1);
     expect(store.getState().auditEvents.some((event) => event.eventType === "ResultReleased")).toBe(true);
+    expect((await service.timeline(actor, request.id)).items.some((event) => event.entityType === "ResultVersion")).toBe(true);
 
     const repeated = await service.releaseResult(labActor, draft.result.id, {
       expectedVersion: updatedDraft.result.version,

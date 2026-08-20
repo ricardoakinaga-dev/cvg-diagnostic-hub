@@ -355,3 +355,37 @@ A fresh compatible default read-only reviewer was commissioned after the special
 
 Decision:
 The local technical bar is complete at the synthetic/local boundary. The release remains `NOT READY` for hospital use until identity/ownership, transfer/alta, critical-result policy/fallback, production AV/object storage/credentials, retention/RPO/RTO, representative workload, manual clinical/accessibility acceptance, remote CI and pilot sign-off are evidenced by the responsible external owners.
+
+### Round 08 — Contract slices and representative local workload — 2026-08-20
+
+Gap:
+The Round 07 implementation still needed explicit operational indicator definitions, validated filters and cursors across query surfaces, a local user/role administration boundary, and performance evidence beyond the catalog endpoint.
+
+Change:
+Implemented the dashboard indicator contract with one `asOf` snapshot and explicit denominators/definitions/actions; corrected the new-result state to `RESULT_AVAILABLE` only; added request filters, typed scoped search, search/timeline/request pagination metadata; added ADMIN-only versioned/audited user-role listing and updates with no credential material in responses; updated the Admin UI, OpenAPI, API specification, traceability and readiness evidence; expanded performance smoke to four read workloads.
+
+Retest:
+102 Vitest tests passed; coverage is 94.69% statements and 80.23% branches; typecheck, lint, build, docs/OpenAPI validation, secret scan and high-severity audit passed; PostgreSQL smoke and disposable restore passed (`1|20|10`); perf smoke passed with 400 requests, 0 errors and maximum route p95 346.03 ms against 500 ms; clean Playwright-managed E2E passed 21/21 and accessibility 6/6.
+
+Critic:
+The specialized reviewer profile was rejected by the harness because its fixed model is unsupported. A compatible default read-only reviewer was commissioned for a final independent audit; no final commit decision is recorded until that result is integrated.
+
+Decision:
+Local evidence is green at the synthetic boundary. External gates remain explicit: hospital identity/ownership and delegated-manager scope, transfer/alta, critical-result thresholds/fallback, production AV/object storage/credentials, approved retention/RPO/RTO, representative hospital workload, manual accessibility/clinical acceptance, remote CI and pilot sign-off.
+
+### Round 09 — Authorization hardening, stable pagination and final retest — 2026-08-20
+
+Gap:
+The Round 08 audit identified server-side authorization gaps for sample receipt, manager scoping, ADMIN clinical bypasses, mixed timeline contexts, notification acknowledgement, SSE revocation and sensitive role changes. It also identified offset cursors and incomplete query/OpenAPI descriptions.
+
+Change:
+Closed those local gaps with server-side department/resource checks, technical-only ADMIN permissions, manager-scoped patient/request/item/search/queue/dashboard/audit reads, matching timeline contexts, permissioned notification acknowledgement, keyset cursors, SSE authorization snapshots, password re-authentication plus expected-version/reason/confirmation controls for role changes, and aligned route schemas/OpenAPI/docs. Added a positive approved-policy test so the critical-policy guard remains executable without inventing clinical thresholds.
+
+Retest:
+`npm run test:coverage` → 107/107, 95.4% statements and 81.01% branches; typecheck/lint/build → PASS; OpenAPI → 47 paths; docs → 56 files; PostgreSQL smoke → PASS; restore smoke → PASS (`1|26|13`); production `next start` perf smoke → 400 requests, 0 errors, max p95 434.69 ms against 500 ms; Playwright E2E → 21/21; accessibility → 6/6; secret scan, high-severity audit and diff check → PASS.
+
+Critic:
+The compatible read-only audit returned `REJECT` with five concrete local findings: session-revoked SSE streams stayed open; a manager could complete an item outside the manager's department; notification acknowledgement lacked idempotency/version/reason/confirmation controls; timeline omitted derived Sample/ResultVersion/Procedure/Attachment events; and the OpenAPI envelope/header contract diverged from runtime. Each finding was fixed and locked by targeted regression tests and fresh gates. The specialized reviewer profile and a second post-fix explorer were unavailable in this account, so no unsupported independent approval is claimed. External gates remain blocked/conditional and are not represented as local implementation failures.
+
+Decision:
+Local technical gates are green at the synthetic/local boundary. The release remains `NOT READY` for hospital use until identity/ownership, delegated-manager policy, transfer/alta, approved critical-result fallback, production AV/object storage/credentials, retention/RPO/RTO, representative workload, manual acceptance, remote CI and pilot sign-off are evidenced by responsible owners.

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ItemState, Permission, Priority, WorkflowType } from "@cvg/contracts";
+import { ITEM_STATES, PRIORITIES, ROLES } from "@cvg/contracts";
+import type { ItemState, Permission, Priority, RoleCode, WorkflowType } from "@cvg/contracts";
 import { aggregateRequestStatus, transitionItem } from "../domain/state-machine";
 import type {
   Admission,
@@ -27,6 +28,12 @@ export interface CommandMeta {
   idempotencyKey?: string;
   expectedVersion?: number;
   correlationId?: string;
+}
+
+export interface NotificationAcknowledgeInput extends CommandMeta {
+  expectedVersion: number;
+  reason: string;
+  confirm: true;
 }
 
 export interface CreateRequestInput {
@@ -129,6 +136,104 @@ export interface ReasonCodePatchInput extends CommandMeta {
   active?: boolean;
 }
 
+export interface UserRoleUpdateInput extends CommandMeta {
+  role: RoleCode;
+  departmentCode: string;
+  active?: boolean;
+  reason: string;
+  confirm: true;
+}
+
+export interface ManagedUser {
+  id: string;
+  email: string;
+  displayName: string;
+  role: RoleCode;
+  departmentCode: string;
+  timezone: string;
+  active: boolean;
+  createdAt: string;
+  version: number;
+}
+
+export type DashboardIndicatorKey = "overdue" | "recollections" | "newResults" | "critical" | "totalActive";
+
+export interface DashboardIndicator {
+  key: DashboardIndicatorKey;
+  label: string;
+  count: number;
+  denominator: number;
+  denominatorDefinition: string;
+  definition: string;
+  nextAction: string;
+}
+
+export interface DashboardWindow {
+  kind: "CURRENT_STATE";
+  label: "Estado atual";
+  timezone: string;
+  asOf: string;
+}
+
+export interface DashboardView {
+  overdue: number;
+  recollections: number;
+  newResults: number;
+  critical: number;
+  totalActive: number;
+  updatedAt: string;
+  window: DashboardWindow;
+  indicators: DashboardIndicator[];
+}
+
+export interface RequestListFilters {
+  status?: ItemState;
+  departmentCode?: string;
+  priority?: Priority;
+  serviceId?: string;
+  overdue?: boolean;
+  from?: string;
+  to?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export type SearchResultType = "REQUEST" | "ITEM";
+
+export interface SearchFilters {
+  types?: SearchResultType[];
+  status?: ItemState;
+  departmentCode?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface SearchResult {
+  type: SearchResultType;
+  id: string;
+  label: string;
+  patient: string;
+  status: ItemState | DiagnosticRequest["aggregateStatus"];
+  priority: Priority;
+  updatedAt: string;
+  departmentCode: string;
+  deepLink: string;
+}
+
+export interface TimelineFilters {
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TimelineResult {
+  items: AuditEvent[];
+  nextCursor?: string;
+  limit: number;
+  total: number;
+}
+
 interface RequestView extends DiagnosticRequest {
   patient: StoreState["patients"][number];
   encounter: StoreState["encounters"][number];
@@ -180,6 +285,39 @@ const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE = 25;
 const ALLOWED_ATTACHMENT_MIME = new Set(["application/pdf", "image/jpeg", "image/png"]);
 
+const INDICATOR_DEFINITIONS: Record<DashboardIndicatorKey, Omit<DashboardIndicator, "key" | "count" | "denominator">> = {
+  overdue: {
+    label: "Atrasados",
+    denominatorDefinition: "itens ativos visíveis no escopo autorizado",
+    definition: "Itens não terminais cujo prazo calculado pelo servidor já passou.",
+    nextAction: "Abrir a fila e tratar por prioridade e SLA."
+  },
+  recollections: {
+    label: "Recoletas",
+    denominatorDefinition: "itens laboratoriais visíveis no escopo autorizado",
+    definition: "Itens laboratoriais que aguardam uma nova amostra após recoleta solicitada.",
+    nextAction: "Receber a nova amostra ou acompanhar o item."
+  },
+  newResults: {
+    label: "Resultados novos",
+    denominatorDefinition: "itens visíveis no escopo autorizado",
+    definition: "Itens com resultado liberado que ainda aguardam revisão.",
+    nextAction: "Abrir e revisar o resultado autorizado."
+  },
+  critical: {
+    label: "Críticos",
+    denominatorDefinition: "notificações críticas do usuário, confirmadas ou não",
+    definition: "Notificações críticas do usuário que ainda não estão confirmadas.",
+    nextAction: "Abrir a notificação e seguir a política crítica aprovada."
+  },
+  totalActive: {
+    label: "Ativos",
+    denominatorDefinition: "itens visíveis no escopo autorizado",
+    definition: "Itens não terminais atualmente visíveis no escopo autorizado.",
+    nextAction: "Abrir a fila e acompanhar os itens ativos."
+  }
+};
+
 function criticalPolicyIsReady(): boolean {
   if (process.env.CRITICAL_POLICY_ENABLED !== "true") return false;
   if (!process.env.CRITICAL_POLICY_VERSION?.trim() || !process.env.CRITICAL_POLICY_APPROVAL_REF?.trim()) return false;
@@ -188,6 +326,30 @@ function criticalPolicyIsReady(): boolean {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function dashboardTimezone(actor: User): string {
+  const candidate = actor.timezone?.trim() || process.env.APP_TIMEZONE?.trim() || "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: candidate }).format();
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+}
+
+function managedUser(user: User): ManagedUser {
+  return {
+    id: user.id,
+    email: user.email,
+    displayName: user.displayName,
+    role: user.role,
+    departmentCode: user.departmentCode,
+    timezone: user.timezone,
+    active: user.active !== false,
+    createdAt: user.createdAt,
+    version: user.version
+  };
 }
 
 function id(prefix: string): string {
@@ -219,6 +381,13 @@ function requireText(value: string, field: string, maxLength: number): string {
   return normalized;
 }
 
+function requireRecentReauthentication(actor: User): void {
+  const reauthenticatedAt = actor.reauthenticatedAt ? Date.parse(actor.reauthenticatedAt) : Number.NaN;
+  if (Number.isNaN(reauthenticatedAt) || Date.now() - reauthenticatedAt > 10 * 60 * 1000 || reauthenticatedAt > Date.now() + 30_000) {
+    throw new ApiError("REAUTH_REQUIRED", "Confirme sua identidade novamente antes de alterar acessos.", 403, { retryable: true });
+  }
+}
+
 function requireActiveUser(state: StoreState, actor: User): User {
   const current = state.users.find((user) => user.id === actor.id);
   if (!current || !current.active) {
@@ -241,9 +410,22 @@ function hasServicePatientContext(state: StoreState, actor: User, patientId: str
   return state.requests.some((request) => request.patientId === patientId && request.itemIds.some((itemId) => state.items.find((item) => item.id === itemId)?.departmentCode === actor.departmentCode));
 }
 
+function hasManagerRequestContext(state: StoreState, actor: User, request: DiagnosticRequest): boolean {
+  return request.requestingDepartmentCode === actor.departmentCode || request.itemIds.some((itemId) => itemFor(state, itemId).departmentCode === actor.departmentCode);
+}
+
+function hasManagerPatientContext(state: StoreState, actor: User, patientId: string): boolean {
+  return state.requests.some((request) => request.patientId === patientId && hasManagerRequestContext(state, actor, request));
+}
+
 function requirePatientPermission(state: StoreState, actor: User, permission: Permission, patientId: string): void {
   if (isExecutorRole(actor)) {
     if (!hasServicePatientContext(state, actor, patientId)) throw new ApiError("SCOPE_DENIED", "Você não tem acesso a este recurso.", 404);
+    requirePermission(actor, permission, { departmentCode: actor.departmentCode });
+    return;
+  }
+  if (actor.role === "MANAGER") {
+    if (!hasManagerPatientContext(state, actor, patientId)) throw new ApiError("SCOPE_DENIED", "Você não tem acesso a este recurso.", 404);
     requirePermission(actor, permission, { departmentCode: actor.departmentCode });
     return;
   }
@@ -258,7 +440,8 @@ function requireRequestPermission(state: StoreState, actor: User, permission: Pe
     return;
   }
   if (actor.role === "MANAGER") {
-    requirePermission(actor, permission, {});
+    if (!hasManagerRequestContext(state, actor, request)) throw new ApiError("SCOPE_DENIED", "Você não tem acesso a este recurso.", 404);
+    requirePermission(actor, permission, { departmentCode: actor.departmentCode });
     return;
   }
   requirePermission(actor, permission, { patientId: request.patientId, departmentCode: request.requestingDepartmentCode });
@@ -311,7 +494,7 @@ function createOutbox(eventType: string, aggregateType: string, aggregateId: str
 
 function notificationFor(
   state: StoreState,
-  notification: Omit<Notification, "id" | "createdAt" | "attempts" | "state">
+  notification: Omit<Notification, "id" | "createdAt" | "attempts" | "state" | "version">
 ): StoreState {
   if (state.notifications.some((item) => item.dedupeKey === notification.dedupeKey && item.recipientUserId === notification.recipientUserId)) {
     return state;
@@ -321,7 +504,8 @@ function notificationFor(
     id: id("notification"),
     createdAt: now(),
     attempts: 0,
-    state: "DELIVERED"
+    state: "DELIVERED",
+    version: 1
   };
   return { ...state, notifications: [...state.notifications, nextNotification] };
 }
@@ -475,18 +659,18 @@ function requestView(state: StoreState, request: DiagnosticRequest): RequestView
 
 function requestViewForActor(state: StoreState, actor: User, request: DiagnosticRequest): RequestView {
   const view = requestView(state, request);
-  if (!isExecutorRole(actor)) return view;
+  if (!isExecutorRole(actor) && actor.role !== "MANAGER") return view;
   const items = view.items.filter((item) => item.departmentCode === actor.departmentCode);
   return { ...view, itemIds: items.map((item) => item.id), items };
 }
 
 function canViewRequest(state: StoreState, actor: User, request: DiagnosticRequest): boolean {
-  if (actor.role === "ADMIN") return true;
+  if (actor.role === "ADMIN") return false;
   if (isExecutorRole(actor)) {
     return request.itemIds.some((itemId) => itemFor(state, itemId).departmentCode === actor.departmentCode);
   }
   if (actor.role === "MANAGER") {
-    return canAccessResource(actor, "request.view", { departmentCode: request.requestingDepartmentCode });
+    return hasManagerRequestContext(state, actor, request) && canAccessResource(actor, "request.view", { departmentCode: actor.departmentCode });
   }
   return Boolean(actor.patientIds?.includes(request.patientId)) && canAccessResource(actor, "request.view", { patientId: request.patientId });
 }
@@ -525,18 +709,119 @@ function requestForAuditEvent(state: StoreState, event: AuditEvent): DiagnosticR
   return undefined;
 }
 
-function decodeCursor(cursor: string | undefined): number {
-  if (!cursor) return 0;
-  if (!/^[A-Za-z0-9_-]+$/.test(cursor)) throw new ApiError("VALIDATION_ERROR", "Cursor inválido.", 400);
-  const offset = Number.parseInt(Buffer.from(cursor, "base64url").toString("utf8"), 10);
-  if (!Number.isSafeInteger(offset) || offset < 0) throw new ApiError("VALIDATION_ERROR", "Cursor inválido.", 400);
-  return offset;
+function auditEventItem(state: StoreState, event: AuditEvent): DiagnosticItem | undefined {
+  const itemId = auditEventItemIds(state, event)[0];
+  return itemId ? state.items.find((item) => item.id === itemId) : undefined;
+}
+
+function auditEventItemIds(state: StoreState, event: AuditEvent): string[] {
+  if (event.entityType === "DiagnosticRequestItem") return state.items.some((item) => item.id === event.entityId) ? [event.entityId] : [];
+  if (event.entityType === "Sample") return state.samples.find((entry) => entry.id === event.entityId)?.itemIds ?? [];
+  let itemId: string | undefined;
+  if (event.entityType === "Result") itemId = state.results.find((result) => result.id === event.entityId)?.itemId;
+  if (event.entityType === "ResultVersion") {
+    const resultId = state.resultVersions.find((version) => version.id === event.entityId)?.resultId;
+    itemId = resultId ? state.results.find((result) => result.id === resultId)?.itemId : undefined;
+  }
+  if (event.entityType === "Procedure") itemId = state.procedures.find((procedure) => procedure.id === event.entityId)?.itemId;
+  if (event.entityType === "ProcedureSchedule") {
+    const procedureId = state.schedules.find((schedule) => schedule.id === event.entityId)?.procedureId;
+    itemId = procedureId ? state.procedures.find((procedure) => procedure.id === procedureId)?.itemId : undefined;
+  }
+  if (event.entityType === "Attachment") {
+    const attachment = state.attachments.find((entry) => entry.id === event.entityId);
+    const resultVersion = attachment ? state.resultVersions.find((version) => version.id === attachment.resultVersionId) : undefined;
+    const result = resultVersion ? state.results.find((entry) => entry.id === resultVersion.resultId) : undefined;
+    itemId = result?.itemId;
+  }
+  return itemId && state.items.some((item) => item.id === itemId) ? [itemId] : [];
+}
+
+function auditEventDepartmentCode(state: StoreState, event: AuditEvent): string | undefined {
+  return auditEventItem(state, event)?.departmentCode;
+}
+
+function requestForNotification(state: StoreState, notification: Notification): DiagnosticRequest | undefined {
+  if (notification.entityType === "REQUEST") return state.requests.find((request) => request.id === notification.entityId);
+  if (notification.entityType === "ITEM") {
+    const item = state.items.find((entry) => entry.id === notification.entityId);
+    return item ? state.requests.find((request) => request.id === item.requestId) : undefined;
+  }
+  if (notification.entityType === "SAMPLE") {
+    const sample = state.samples.find((entry) => entry.id === notification.entityId);
+    return sample ? state.requests.find((request) => request.id === sample.requestId) : undefined;
+  }
+  const version = state.resultVersions.find((entry) => entry.id === notification.entityId);
+  const result = version ? state.results.find((entry) => entry.id === version.resultId) : undefined;
+  const item = result ? state.items.find((entry) => entry.id === result.itemId) : undefined;
+  return item ? state.requests.find((request) => request.id === item.requestId) : undefined;
+}
+
+interface SearchCursor {
+  rank: number;
+  updatedAt: string;
+  id: string;
+}
+
+interface TimelineCursor {
+  occurredAt: string;
+  id: string;
+}
+
+interface RequestCursor {
+  createdAt: string;
+  id: string;
+}
+
+interface AuditCursor {
+  occurredAt: string;
+  id: string;
+}
+
+function decodeKeysetCursor<T>(cursor: string | undefined, valid: (value: Record<string, unknown>) => boolean): T | undefined {
+  if (!cursor) return undefined;
+  try {
+    const decoded: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded) || !valid(decoded as Record<string, unknown>)) throw new Error("invalid");
+    return decoded as T;
+  } catch {
+    throw new ApiError("VALIDATION_ERROR", "Cursor inválido.", 400);
+  }
+}
+
+function decodeSearchCursor(cursor: string | undefined): SearchCursor | undefined {
+  return decodeKeysetCursor<SearchCursor>(cursor, (value) => Number.isSafeInteger(value.rank) && Number(value.rank) >= 0 && Number(value.rank) <= 2 && typeof value.updatedAt === "string" && !Number.isNaN(Date.parse(value.updatedAt)) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 200);
+}
+
+function decodeTimelineCursor(cursor: string | undefined): TimelineCursor | undefined {
+  return decodeKeysetCursor<TimelineCursor>(cursor, (value) => typeof value.occurredAt === "string" && !Number.isNaN(Date.parse(value.occurredAt)) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 200);
+}
+
+function decodeRequestCursor(cursor: string | undefined): RequestCursor | undefined {
+  return decodeKeysetCursor<RequestCursor>(cursor, (value) => typeof value.createdAt === "string" && !Number.isNaN(Date.parse(value.createdAt)) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 200);
+}
+
+function decodeAuditCursor(cursor: string | undefined): AuditCursor | undefined {
+  return decodeKeysetCursor<AuditCursor>(cursor, (value) => typeof value.occurredAt === "string" && !Number.isNaN(Date.parse(value.occurredAt)) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 200);
+}
+
+function encodeKeysetCursor(value: SearchCursor | TimelineCursor | RequestCursor | AuditCursor): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
 function pageSize(value: number | undefined): number {
   const resolved = value ?? DEFAULT_PAGE_SIZE;
   if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > 100) throw new ApiError("VALIDATION_ERROR", "O limite deve ser um inteiro entre 1 e 100.", 400);
   return resolved;
+}
+
+function dateFilter(value: string | undefined, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 100) throw new ApiError("VALIDATION_ERROR", `O filtro ${field} é inválido.`, 400);
+  const timestamp = Date.parse(normalized);
+  if (Number.isNaN(timestamp)) throw new ApiError("VALIDATION_ERROR", `O filtro ${field} é inválido.`, 400);
+  return timestamp;
 }
 
 function resultView(state: StoreState, result: Result): ResultView {
@@ -672,13 +957,15 @@ export function createApplicationService(store: StateStore, dependencies: { stor
     async getPatientDiagnostics(actor: User, patientId: string, filters: { limit?: number; cursor?: string } = {}): Promise<PatientDiagnosticsResult> {
       const state = store.getState();
       const patient = findOrThrow(state.patients.find((entry) => entry.id === patientId));
-      requirePatientPermission(state, actor, "patient.view", patient.id);
       const limit = pageSize(filters.limit);
-      const offset = decodeCursor(filters.cursor);
+      requirePatientPermission(state, actor, "patient.view", patient.id);
+      const cursor = decodeRequestCursor(filters.cursor);
       const requests = state.requests
         .filter((request) => request.patientId === patient.id && canViewRequest(state, actor, request))
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-      const page = requests.slice(offset, offset + limit).map((request) => requestViewForActor(state, actor, request));
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
+      const afterCursor = cursor ? requests.filter((request) => request.createdAt < cursor.createdAt || (request.createdAt === cursor.createdAt && request.id > cursor.id)) : requests;
+      const pageRequests = afterCursor.slice(0, limit);
+      const page = pageRequests.map((request) => requestViewForActor(state, actor, request));
       const visibleRequestIds = new Set(requests.map((request) => request.id));
       const visibleItemIds = new Set(requests.flatMap((request) => request.itemIds));
       const events = state.auditEvents
@@ -687,7 +974,8 @@ export function createApplicationService(store: StateStore, dependencies: { stor
           return request?.patientId === patient.id && (visibleRequestIds.has(request.id) || (event.entityType === "DiagnosticRequestItem" && visibleItemIds.has(event.entityId)));
         })
         .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
-      const nextCursor = offset + limit < requests.length ? Buffer.from(String(offset + limit)).toString("base64url") : undefined;
+      const last = pageRequests.at(-1);
+      const nextCursor = last && pageRequests.length < afterCursor.length ? encodeKeysetCursor({ createdAt: last.createdAt, id: last.id }) : undefined;
       return { patient: { ...patient }, items: page, events, nextCursor, limit, total: requests.length };
     },
 
@@ -697,6 +985,9 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       const request = requestFor(state, item.requestId);
       const service = serviceFor(state, item.serviceId);
       if (isExecutorRole(actor)) {
+        requirePermission(actor, "item.view", { departmentCode: service.departmentCode });
+      } else if (actor.role === "MANAGER") {
+        if (!hasManagerRequestContext(state, actor, request) || service.departmentCode !== actor.departmentCode) throw new ApiError("SCOPE_DENIED", "Você não tem acesso a este recurso.", 404);
         requirePermission(actor, "item.view", { departmentCode: service.departmentCode });
       } else {
         requirePermission(actor, "item.view", { patientId: request.patientId, departmentCode: request.requestingDepartmentCode });
@@ -718,6 +1009,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         if (serviceItems.some(({ item, service }) => item.requestId !== request.id || service.workflowType !== "LABORATORY" || item.status !== "REQUESTED")) {
           throw new ApiError("INVALID_STATE_TRANSITION", "A amostra só pode ser recebida para itens laboratoriais solicitados.", 409);
         }
+        requirePermission(currentActor, "sample.receive", { departmentCode: serviceItems[0].service.departmentCode });
         if (!input.accessionCode.match(/^[A-Z0-9][A-Z0-9-]{2,39}$/)) throw new ApiError("VALIDATION_ERROR", "Accession inválido.", 400);
         if (originalState.samples.some((sample) => sample.accessionCode === input.accessionCode)) throw new ApiError("CONFLICT", "Accession já utilizado.", 409);
         const receivedAt = now();
@@ -753,7 +1045,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         let nextState = nextRequestState({ ...originalState, samples: [...originalState.samples.filter((entry) => entry.id !== sample.id), rejectedSample, replacement] }, request, updatedItems);
         const requester = findOrThrow(originalState.users.find((user) => user.id === request.requesterId));
         const correlationId = input.correlationId ?? id("corr");
-        const notification: Omit<Notification, "id" | "createdAt" | "attempts" | "state"> = { category: "ACTIONABLE", priority: "HIGH", recipientUserId: requester.id, entityType: "SAMPLE", entityId: replacement.id, deepLink: `/requests/${request.id}`, title: "Nova coleta necessária", body: `${requester.displayName}, a amostra ${sample.accessionCode} precisa ser recolhida: ${reason.label}.`, dedupeKey: `recollection:${sample.id}:${replacement.id}` };
+        const notification: Omit<Notification, "id" | "createdAt" | "attempts" | "state" | "version"> = { category: "ACTIONABLE", priority: "HIGH", recipientUserId: requester.id, entityType: "SAMPLE", entityId: replacement.id, deepLink: `/requests/${request.id}`, title: "Nova coleta necessária", body: `${requester.displayName}, a amostra ${sample.accessionCode} precisa ser recolhida: ${reason.label}.`, dedupeKey: `recollection:${sample.id}:${replacement.id}` };
         nextState = notificationFor(nextState, notification);
         nextState = { ...nextState, auditEvents: [...nextState.auditEvents, createAudit("SampleRejected", currentActor.id, "Sample", sample.id, correlationId, "RECEIVED", "REJECTED", { reasonCode: reason.code }), createAudit("RecollectionRequested", currentActor.id, "Sample", replacement.id, correlationId, undefined, "EXPECTED", { replacesSampleId: sample.id })], outbox: [...nextState.outbox, createOutbox("RecollectionRequested", "Sample", replacement.id, correlationId, { reasonCode: reason.code, replacesSampleId: sample.id })] };
         const result = { sample: rejectedSample, replacement, items: updatedItems, request: requestViewForActor(nextState, currentActor, requestFor(nextState, request.id)) };
@@ -1088,7 +1380,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         const correlationId = input.correlationId ?? id("corr");
         let nextState = nextRequestState({ ...originalState, results: originalState.results.map((entry) => entry.id === result.id ? releasedResult : entry), resultVersions: originalState.resultVersions.map((entry) => entry.id === view.version.id ? releasedVersion : entry) }, view.request, [releasedItem]);
         const requester = findOrThrow(originalState.users.find((user) => user.id === view.request.requesterId));
-        const notification: Omit<Notification, "id" | "createdAt" | "attempts" | "state"> = { category: releasedVersion.critical ? "CRITICAL" : "ACTIONABLE", priority: releasedVersion.critical ? "URGENT" : "HIGH", recipientUserId: requester.id, entityType: "RESULT_VERSION", entityId: releasedVersion.id, deepLink: `/results/${result.id}`, title: releasedVersion.critical ? "Resultado crítico requer confirmação" : "Resultado disponível", body: `${view.patient.displayName} · ${view.service.name} · versão ${releasedVersion.sequence} liberada.`, dedupeKey: `release:${releasedVersion.id}:${requester.id}` };
+        const notification: Omit<Notification, "id" | "createdAt" | "attempts" | "state" | "version"> = { category: releasedVersion.critical ? "CRITICAL" : "ACTIONABLE", priority: releasedVersion.critical ? "URGENT" : "HIGH", recipientUserId: requester.id, entityType: "RESULT_VERSION", entityId: releasedVersion.id, deepLink: `/results/${result.id}`, title: releasedVersion.critical ? "Resultado crítico requer confirmação" : "Resultado disponível", body: `${view.patient.displayName} · ${view.service.name} · versão ${releasedVersion.sequence} liberada.`, dedupeKey: `release:${releasedVersion.id}:${requester.id}` };
         nextState = notificationFor(nextState, notification);
         nextState = { ...nextState, auditEvents: [...nextState.auditEvents, createAudit("ResultReleased", currentActor.id, "ResultVersion", releasedVersion.id, correlationId, "DRAFT", "RELEASED", { resultId, critical: releasedVersion.critical }), createAudit("DiagnosticItemResultAvailable", currentActor.id, "DiagnosticRequestItem", releasedItem.id, correlationId, view.item.status, releasedItem.status, {})], outbox: [...nextState.outbox, createOutbox("ResultReleased", "Result", result.id, correlationId, { versionId: releasedVersion.id, critical: releasedVersion.critical })] };
         const response = { result: releasedResult, version: releasedVersion, item: releasedItem, request: requestViewForActor(nextState, currentActor, requestFor(nextState, view.request.id)) };
@@ -1306,6 +1598,50 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       }
     },
 
+    async listManagedUsers(actor: User): Promise<ManagedUser[]> {
+      const state = store.getState();
+      requirePermission(actor, "user_role.manage", {});
+      return state.users
+        .slice()
+        .sort((left, right) => left.displayName.localeCompare(right.displayName, "pt-BR"))
+        .map(managedUser);
+    },
+
+    async updateUserRole(actor: User, userId: string, input: UserRoleUpdateInput): Promise<ManagedUser> {
+      const scope = "POST:/users/roles";
+      return store.transaction(async (originalState) => {
+        const currentActor = requireActiveUser(originalState, actor);
+        requireIdempotencyKey(input.idempotencyKey);
+        requirePermission(currentActor, "user_role.manage", {});
+        requireRecentReauthentication(actor);
+        if (input.expectedVersion === undefined) throw new ApiError("VALIDATION_ERROR", "expectedVersion é obrigatório para alterar uma role.", 400);
+        if (input.confirm !== true) throw new ApiError("VALIDATION_ERROR", "A confirmação explícita da alteração é obrigatória.", 400);
+        if (typeof input.reason !== "string") throw new ApiError("VALIDATION_ERROR", "reason é obrigatório para alterar uma role.", 400);
+        const reason = requireText(input.reason, "reason", 500);
+        const idempotent = withIdempotency<ManagedUser>(originalState, currentActor.id, scope, input.idempotencyKey, { userId, input });
+        if (idempotent.found) return { state: originalState, result: idempotent.existing! };
+        if (currentActor.id === userId) throw new ApiError("VALIDATION_ERROR", "A própria sessão não pode alterar seu role.", 400);
+        if (!ROLES.includes(input.role)) throw new ApiError("VALIDATION_ERROR", "O role informado é inválido.", 400);
+        const departmentCode = requireText(input.departmentCode, "departmentCode", 60).toUpperCase();
+        if (!/^[A-Z0-9_-]{1,60}$/.test(departmentCode)) throw new ApiError("VALIDATION_ERROR", "O departamento informado é inválido.", 400);
+        const target = findOrThrow(originalState.users.find((user) => user.id === userId));
+        ensureExpectedVersion(target.version, input.expectedVersion);
+        const nextActive = input.active ?? target.active;
+        if (target.role === "ADMIN" && target.active && !nextActive && originalState.users.filter((user) => user.active && user.role === "ADMIN" && user.id !== target.id).length === 0) {
+          throw new ApiError("CONFLICT", "O último administrador ativo não pode ser desativado.", 409);
+        }
+        const updated: User = { ...target, role: input.role, departmentCode, active: nextActive, version: target.version + 1 };
+        const correlationId = input.correlationId ?? id("corr");
+        const nextState = {
+          ...originalState,
+          users: originalState.users.map((user) => user.id === target.id ? updated : user),
+          auditEvents: [...originalState.auditEvents, createAudit("UserRoleUpdated", currentActor.id, "User", target.id, correlationId, `${target.role}:${target.departmentCode}:${target.active}`, `${updated.role}:${updated.departmentCode}:${updated.active}`, { reason })]
+        };
+        const result = managedUser(updated);
+        return { state: saveIdempotency(nextState, currentActor.id, scope, input.idempotencyKey, result, { userId, input }), result };
+      });
+    },
+
     async listServices(actor: User, options: { includeInactive?: boolean } = {}) {
       const state = store.getState();
       const includeInactive = options.includeInactive === true;
@@ -1429,7 +1765,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       const normalizedQuery = query.trim().toLocaleLowerCase("pt-BR");
       if (normalizedQuery.length > 200) throw new ApiError("VALIDATION_ERROR", "A busca de pacientes é muito longa.", 400);
       return state.patients
-        .filter((patient) => actor.role === "ADMIN" || actor.role === "MANAGER" || actor.patientIds?.includes(patient.id) || (isExecutorRole(actor) && hasServicePatientContext(state, actor, patient.id)))
+        .filter((patient) => actor.role === "MANAGER" ? hasManagerPatientContext(state, actor, patient.id) : Boolean(actor.patientIds?.includes(patient.id)) || (isExecutorRole(actor) && hasServicePatientContext(state, actor, patient.id)))
         .filter((patient) => !normalizedQuery || [patient.displayName, patient.externalId, patient.species, patient.ownerLabel].some((field) => field.toLocaleLowerCase("pt-BR").includes(normalizedQuery)))
         .map((patient) => ({ ...patient }))
         .slice(0, 100);
@@ -1439,16 +1775,21 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       const state = store.getState();
       requirePermission(actor, "audit.view", { departmentCode: actor.departmentCode });
       const limit = pageSize(filters.limit);
-      const offset = decodeCursor(filters.cursor);
+      const cursor = decodeAuditCursor(filters.cursor);
       const events = state.auditEvents
         .filter((event) => {
           const request = requestForAuditEvent(state, event);
-          if (!request) return actor.role === "ADMIN" || actor.role === "MANAGER";
+          if (!request) return actor.role === "ADMIN";
+          const eventDepartmentCode = auditEventDepartmentCode(state, event);
+          if (actor.role === "MANAGER" && eventDepartmentCode && eventDepartmentCode !== actor.departmentCode) return false;
           return canViewRequest(state, actor, request);
         })
-        .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt));
-      const items = events.slice(offset, offset + limit).map((event) => ({ ...event, metadata: { ...event.metadata } }));
-      const nextCursor = offset + limit < events.length ? Buffer.from(String(offset + limit)).toString("base64url") : undefined;
+        .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt) || left.id.localeCompare(right.id));
+      const afterCursor = cursor ? events.filter((event) => event.occurredAt < cursor.occurredAt || (event.occurredAt === cursor.occurredAt && event.id > cursor.id)) : events;
+      const page = afterCursor.slice(0, limit);
+      const items = page.map((event) => ({ ...event, metadata: { ...event.metadata } }));
+      const last = page.at(-1);
+      const nextCursor = last && page.length < afterCursor.length ? encodeKeysetCursor({ occurredAt: last.occurredAt, id: last.id }) : undefined;
       return { items, nextCursor, limit, total: events.length };
     },
 
@@ -1481,24 +1822,43 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       return admission;
     },
 
-    async listRequests(actor: User, filters: { status?: ItemState; departmentCode?: string; limit?: number; cursor?: string } = {}) {
+    async listRequests(actor: User, filters: RequestListFilters = {}) {
       const state = store.getState();
       requirePermission(actor, "request.list", {});
+      if (filters.status && !ITEM_STATES.includes(filters.status)) throw new ApiError("VALIDATION_ERROR", "O status informado é inválido.", 400);
+      if (filters.priority && !PRIORITIES.includes(filters.priority)) throw new ApiError("VALIDATION_ERROR", "A prioridade informada é inválida.", 400);
       const limit = pageSize(filters.limit);
-      const offset = decodeCursor(filters.cursor);
+      const cursor = decodeRequestCursor(filters.cursor);
       const departmentCode = filters.departmentCode?.trim().toUpperCase();
       if (departmentCode && !/^[A-Z0-9_-]{1,60}$/.test(departmentCode)) throw new ApiError("VALIDATION_ERROR", "O departamento informado é inválido.", 400);
+      const serviceId = filters.serviceId?.trim();
+      if (serviceId && (serviceId.length > 100 || !/^[A-Za-z0-9_-]+$/.test(serviceId))) throw new ApiError("VALIDATION_ERROR", "O serviço informado é inválido.", 400);
+      const from = dateFilter(filters.from, "from");
+      const to = dateFilter(filters.to, "to");
+      if (from !== undefined && to !== undefined && from > to) throw new ApiError("VALIDATION_ERROR", "O intervalo de datas é inválido.", 400);
+      const currentTime = Date.now();
       const requests = state.requests
+        .filter((request) => (from === undefined || Date.parse(request.createdAt) >= from) && (to === undefined || Date.parse(request.createdAt) <= to))
         .filter((request) => request.itemIds.some((itemId) => {
           const item = itemFor(state, itemId);
           const service = serviceFor(state, item.serviceId);
-          const visibleByPatient = actor.role === "ADMIN" || actor.role === "MANAGER" || Boolean(actor.patientIds?.includes(request.patientId));
+          const visibleByPatient = canViewRequest(state, actor, request) || Boolean(actor.patientIds?.includes(request.patientId));
           const visibleByService = ["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode;
-          return (visibleByPatient || visibleByService) && (!filters.status || item.status === filters.status) && (!departmentCode || item.departmentCode === departmentCode);
+          const managerItemScope = actor.role !== "MANAGER" || item.departmentCode === actor.departmentCode;
+          const overdue = new Date(item.dueAt).getTime() < currentTime && !["COMPLETED", "CANCELLED", "REJECTED"].includes(item.status);
+          return (visibleByPatient || visibleByService) && managerItemScope &&
+            (!filters.status || item.status === filters.status) &&
+            (!departmentCode || item.departmentCode === departmentCode) &&
+            (!filters.priority || item.priority === filters.priority) &&
+            (!serviceId || item.serviceId === serviceId) &&
+            (filters.overdue === undefined || overdue === filters.overdue);
         }))
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-      const page = requests.slice(offset, offset + limit).map((request) => requestViewForActor(state, actor, request));
-      const nextCursor = offset + limit < requests.length ? Buffer.from(String(offset + limit)).toString("base64url") : undefined;
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id));
+      const afterCursor = cursor ? requests.filter((request) => request.createdAt < cursor.createdAt || (request.createdAt === cursor.createdAt && request.id > cursor.id)) : requests;
+      const pageRequests = afterCursor.slice(0, limit);
+      const page = pageRequests.map((request) => requestViewForActor(state, actor, request));
+      const last = pageRequests.at(-1);
+      const nextCursor = last && pageRequests.length < afterCursor.length ? encodeKeysetCursor({ createdAt: last.createdAt, id: last.id }) : undefined;
       return { items: page, nextCursor, limit, total: requests.length };
     },
 
@@ -1512,18 +1872,27 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     },
 
-    async acknowledgeNotification(actor: User, notificationId: string, input: CommandMeta) {
+    async acknowledgeNotification(actor: User, notificationId: string, input: NotificationAcknowledgeInput) {
       const scope = "POST:/notifications/acknowledge";
       return store.transaction(async (originalState) => {
         const currentActor = requireActiveUser(originalState, actor);
+        requireIdempotencyKey(input.idempotencyKey);
+        requirePermission(currentActor, "notification.view", {});
+        requirePermission(currentActor, "notification.acknowledge", {});
+        if (input.confirm !== true) throw new ApiError("VALIDATION_ERROR", "A confirmação explícita é obrigatória.", 400);
+        const reason = requireText(input.reason, "reason", 500);
         const idempotent = withIdempotency(originalState, currentActor.id, scope, input.idempotencyKey, { notificationId, input });
         if (idempotent.found) return { state: originalState, result: idempotent.existing! };
         const notification = findOrThrow(originalState.notifications.find((entry) => entry.id === notificationId));
-        if (notification.recipientUserId !== currentActor.id && currentActor.role !== "MANAGER" && currentActor.role !== "ADMIN") throw new ApiError("NOT_FOUND", "Notificação não encontrada.", 404);
+        ensureExpectedVersion(notification.version, input.expectedVersion);
+        if (notification.recipientUserId !== currentActor.id) {
+          const request = requestForNotification(originalState, notification);
+          if (currentActor.role !== "MANAGER" || !request || !hasManagerRequestContext(originalState, currentActor, request)) throw new ApiError("NOT_FOUND", "Notificação não encontrada.", 404);
+        }
         const acknowledgedAt = now();
-        const updated = { ...notification, state: "ACKNOWLEDGED" as const, acknowledgedAt, acknowledgedBy: currentActor.id };
+        const updated = { ...notification, state: "ACKNOWLEDGED" as const, acknowledgedAt, acknowledgedBy: currentActor.id, version: notification.version + 1 };
         const correlationId = input.correlationId ?? id("corr");
-        const nextState = { ...originalState, notifications: originalState.notifications.map((entry) => entry.id === notification.id ? updated : entry), auditEvents: [...originalState.auditEvents, createAudit("NotificationAcknowledged", currentActor.id, "Notification", notification.id, correlationId, notification.state, "ACKNOWLEDGED", {})] };
+        const nextState = { ...originalState, notifications: originalState.notifications.map((entry) => entry.id === notification.id ? updated : entry), auditEvents: [...originalState.auditEvents, createAudit("NotificationAcknowledged", currentActor.id, "Notification", notification.id, correlationId, notification.state, "ACKNOWLEDGED", { reason })] };
         const result = updated;
         return { state: saveIdempotency(nextState, currentActor.id, scope, input.idempotencyKey, result, { notificationId, input }), result };
       });
@@ -1534,7 +1903,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       const normalizedDepartment = departmentCode.trim().toUpperCase();
       if (!/^[A-Z0-9_-]{1,60}$/.test(normalizedDepartment)) throw new ApiError("VALIDATION_ERROR", "O departamento informado é inválido.", 400);
       requirePermission(actor, "queue.view", { departmentCode: normalizedDepartment });
-      if (actor.role !== "ADMIN" && actor.role !== "MANAGER" && actor.departmentCode !== normalizedDepartment) throw new ApiError("NOT_FOUND", "Fila não encontrada.", 404);
+      if (actor.role !== "MANAGER" && actor.departmentCode !== normalizedDepartment) throw new ApiError("NOT_FOUND", "Fila não encontrada.", 404);
       const currentTime = Date.now();
       const priorityRank: Record<Priority, number> = { EMERGENCY: 0, URGENT: 1, ROUTINE: 2 };
       const items = state.items
@@ -1551,52 +1920,165 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       });
     },
 
-    async search(actor: User, query: string, limit = DEFAULT_PAGE_SIZE) {
+    async search(actor: User, query: string, filters: SearchFilters = {}) {
       const normalized = query.trim().toLocaleLowerCase("pt-BR");
-      const boundedLimit = pageSize(limit);
+      const boundedLimit = pageSize(filters.limit);
+      const cursor = decodeSearchCursor(filters.cursor);
       if (normalized.length < 2) throw new ApiError("VALIDATION_ERROR", "Digite pelo menos 2 caracteres ou use um protocolo completo.", 400);
       const state = store.getState();
       requirePermission(actor, "search.execute", {});
-      const results = state.requests.flatMap((request) => {
+      if (filters.status && !ITEM_STATES.includes(filters.status)) throw new ApiError("VALIDATION_ERROR", "O status informado é inválido.", 400);
+      const departmentCode = filters.departmentCode?.trim().toUpperCase();
+      if (departmentCode && !/^[A-Z0-9_-]{1,60}$/.test(departmentCode)) throw new ApiError("VALIDATION_ERROR", "O setor informado é inválido.", 400);
+      const from = dateFilter(filters.from, "from");
+      const to = dateFilter(filters.to, "to");
+      if (from !== undefined && to !== undefined && from > to) throw new ApiError("VALIDATION_ERROR", "O intervalo de datas é inválido.", 400);
+      const requestedTypes = filters.types?.length ? new Set(filters.types) : new Set<SearchResultType>(["REQUEST"]);
+      if ([...requestedTypes].some((type) => !["REQUEST", "ITEM"].includes(type))) throw new ApiError("VALIDATION_ERROR", "O tipo de busca é inválido.", 400);
+      const rankFor = (fields: string[]): number | undefined => {
+        const normalizedFields = fields.map((field) => field.toLocaleLowerCase("pt-BR"));
+        if (normalizedFields.some((field) => field === normalized)) return 0;
+        if (normalizedFields.some((field) => field.startsWith(normalized))) return 1;
+        if (normalizedFields.some((field) => field.includes(normalized))) return 2;
+        return undefined;
+      };
+      const ranked: Array<{ result: SearchResult; rank: number }> = [];
+      for (const request of state.requests) {
+        if ((from !== undefined && Date.parse(request.createdAt) < from) || (to !== undefined && Date.parse(request.createdAt) > to)) continue;
         const items = request.itemIds.map((itemId) => itemFor(state, itemId));
-        const visible = items.some((item) => {
+        const visibleItems = items.filter((item) => {
           const service = serviceFor(state, item.serviceId);
-          return actor.role === "ADMIN" || actor.role === "MANAGER" || actor.patientIds?.includes(request.patientId) || (["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode);
+          const visibleByRequest = canViewRequest(state, actor, request) || actor.patientIds?.includes(request.patientId);
+          const visibleByService = ["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode;
+          const managerItemScope = actor.role !== "MANAGER" || service.departmentCode === actor.departmentCode;
+          const visible = Boolean(visibleByRequest || visibleByService) && managerItemScope;
+          return visible && (!filters.status || item.status === filters.status) && (!departmentCode || item.departmentCode === departmentCode);
         });
-        if (!visible) return [];
+        if (!visibleItems.length) continue;
         const patient = findOrThrow(state.patients.find((entry) => entry.id === request.patientId));
-        const visibleItems = isExecutorRole(actor) ? items.filter((item) => item.departmentCode === actor.departmentCode) : items;
-        const searchableFields = [request.requestCode, patient.displayName, patient.externalId, ...visibleItems.map((item) => serviceFor(state, item.serviceId).name), ...visibleItems.flatMap((item) => state.samples.filter((sample) => sample.itemIds.includes(item.id)).map((sample) => sample.accessionCode))];
-        if (!searchableFields.some((value) => value.toLocaleLowerCase("pt-BR").includes(normalized))) return [];
-        return [{ type: "REQUEST", id: request.id, label: request.requestCode, patient: patient.displayName, status: request.aggregateStatus, deepLink: `/requests/${request.id}` }];
-      });
-      return results.slice(0, boundedLimit);
+        const requester = state.users.find((user) => user.id === request.requesterId);
+        const visibleEntityIds = new Set([request.id, ...visibleItems.map((item) => item.id)]);
+        const reviewerFields = state.auditEvents
+          .filter((event) => visibleEntityIds.has(event.entityId) && event.actorId)
+          .flatMap((event) => {
+            const user = state.users.find((entry) => entry.id === event.actorId);
+            return [event.actorId!, user?.displayName ?? "", user?.email ?? ""];
+          });
+        const requestFields = [request.requestCode, patient.displayName, patient.ownerLabel, patient.externalId, request.requesterId, requester?.displayName ?? "", requester?.email ?? "", ...reviewerFields];
+        const requestRank = rankFor(requestFields);
+        if (requestRank !== undefined && requestedTypes.has("REQUEST")) {
+          ranked.push({
+            rank: requestRank,
+            result: {
+              type: "REQUEST",
+              id: request.id,
+              label: request.requestCode,
+              patient: patient.displayName,
+              status: request.aggregateStatus,
+              priority: request.priority,
+              updatedAt: request.updatedAt,
+              departmentCode: visibleItems[0].departmentCode,
+              deepLink: `/requests/${request.id}`
+            }
+          });
+        }
+        if (requestedTypes.has("ITEM")) {
+          for (const item of visibleItems) {
+            const service = serviceFor(state, item.serviceId);
+            const sampleFields = state.samples.filter((sample) => sample.itemIds.includes(item.id)).map((sample) => sample.accessionCode);
+            const itemRank = rankFor([item.id, item.departmentCode, service.id, service.code, service.name, ...sampleFields]);
+            if (itemRank === undefined) continue;
+            ranked.push({
+              rank: itemRank,
+              result: {
+                type: "ITEM",
+                id: item.id,
+                label: `${service.code} · ${request.requestCode}`,
+                patient: patient.displayName,
+                status: item.status,
+                priority: item.priority,
+                updatedAt: request.updatedAt,
+                departmentCode: item.departmentCode,
+                deepLink: `/requests/${request.id}#${item.id}`
+              }
+            });
+          }
+        }
+      }
+      const sorted = ranked.sort((left, right) => left.rank - right.rank || right.result.updatedAt.localeCompare(left.result.updatedAt) || left.result.id.localeCompare(right.result.id));
+      const afterCursor = cursor
+        ? sorted.filter((entry) => entry.rank > cursor.rank || (entry.rank === cursor.rank && (entry.result.updatedAt < cursor.updatedAt || (entry.result.updatedAt === cursor.updatedAt && entry.result.id > cursor.id))))
+        : sorted;
+      const page = afterCursor.slice(0, boundedLimit);
+      const last = page.at(-1);
+      const nextCursor = last && page.length < afterCursor.length ? encodeKeysetCursor({ rank: last.rank, updatedAt: last.result.updatedAt, id: last.result.id }) : undefined;
+      return { items: page.map((entry) => entry.result), nextCursor, limit: boundedLimit, total: sorted.length };
     },
 
-    async timeline(actor: User, requestId?: string, itemId?: string) {
+    async timeline(actor: User, requestId?: string, itemId?: string, filters: TimelineFilters = {}): Promise<TimelineResult> {
       const state = store.getState();
       const item = itemId ? itemFor(state, itemId) : undefined;
       const request = requestId ? requestFor(state, requestId) : item ? requestFor(state, item.requestId) : undefined;
       if (!request) throw new ApiError("VALIDATION_ERROR", "Informe requestId ou itemId.", 400);
+      if (item && item.requestId !== request.id) throw new ApiError("NOT_FOUND", "A solicitação e o item não pertencem ao mesmo contexto.", 404);
       requireRequestPermission(state, actor, "timeline.view", request);
-      const visibleItemIds = isExecutorRole(actor) ? request.itemIds.filter((itemId) => itemFor(state, itemId).departmentCode === actor.departmentCode) : request.itemIds;
-      const entityIds = new Set([request.id, ...visibleItemIds, ...(item ? [item.id] : [])]);
-      return state.auditEvents.filter((event) => entityIds.has(event.entityId)).sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
+      const visibleItemIds = (isExecutorRole(actor) || actor.role === "MANAGER") ? request.itemIds.filter((entryId) => itemFor(state, entryId).departmentCode === actor.departmentCode) : request.itemIds;
+      const limit = pageSize(filters.limit);
+      const cursor = decodeTimelineCursor(filters.cursor);
+      const events = state.auditEvents
+        .filter((event) => {
+          const eventRequest = requestForAuditEvent(state, event);
+          if (!eventRequest || eventRequest.id !== request.id) return false;
+          const eventItemIds = auditEventItemIds(state, event);
+          return eventItemIds.length === 0 || eventItemIds.some((eventItemId) => visibleItemIds.includes(eventItemId));
+        })
+        .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.id.localeCompare(right.id));
+      const afterCursor = cursor
+        ? events.filter((event) => event.occurredAt > cursor.occurredAt || (event.occurredAt === cursor.occurredAt && event.id > cursor.id))
+        : events;
+      const page = afterCursor.slice(0, limit);
+      const last = page.at(-1);
+      const nextCursor = last && page.length < afterCursor.length ? encodeKeysetCursor({ occurredAt: last.occurredAt, id: last.id }) : undefined;
+      const items = page.map((event) => ({ ...event, metadata: { ...event.metadata } }));
+      return { items, nextCursor, limit, total: events.length };
     },
 
-    async dashboard(actor: User) {
+    async dashboard(actor: User): Promise<DashboardView> {
       const state = store.getState();
       requirePermission(actor, "dashboard.view", { departmentCode: actor.departmentCode });
       const visibleItems = state.items.filter((item) => {
         const request = requestFor(state, item.requestId);
         const service = serviceFor(state, item.serviceId);
-        return actor.role === "ADMIN" || actor.role === "MANAGER" || actor.patientIds?.includes(request.patientId) || (["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode);
+        if (actor.role === "MANAGER") return item.departmentCode === actor.departmentCode;
+        return Boolean(actor.patientIds?.includes(request.patientId)) || (["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode);
       });
-      const overdue = visibleItems.filter((item) => new Date(item.dueAt).getTime() < Date.now() && !["COMPLETED", "CANCELLED", "REJECTED"].includes(item.status)).length;
+      const asOf = now();
+      const currentTime = Date.parse(asOf);
+      const terminalStatuses = new Set(["COMPLETED", "CANCELLED", "REJECTED"]);
+      const activeItems = visibleItems.filter((item) => !terminalStatuses.has(item.status));
+      const laboratoryItems = visibleItems.filter((item) => item.workflowType === "LABORATORY");
+      const criticalNotifications = state.notifications.filter((notification) => notification.recipientUserId === actor.id && notification.category === "CRITICAL");
+      const overdue = activeItems.filter((item) => new Date(item.dueAt).getTime() < currentTime).length;
       const recollections = visibleItems.filter((item) => item.status === "RECOLLECTION_REQUIRED").length;
-      const newResults = visibleItems.filter((item) => ["RESULT_AVAILABLE", "REVIEWED"].includes(item.status)).length;
-      const critical = state.notifications.filter((notification) => notification.recipientUserId === actor.id && notification.category === "CRITICAL" && notification.state !== "ACKNOWLEDGED").length;
-      return { overdue, recollections, newResults, critical, totalActive: visibleItems.filter((item) => !["COMPLETED", "CANCELLED", "REJECTED"].includes(item.status)).length, updatedAt: now() };
+      const newResults = visibleItems.filter((item) => item.status === "RESULT_AVAILABLE").length;
+      const critical = criticalNotifications.filter((notification) => notification.state !== "ACKNOWLEDGED").length;
+      const totalActive = activeItems.length;
+      const counts: Record<DashboardIndicatorKey, number> = { overdue, recollections, newResults, critical, totalActive };
+      const denominators: Record<DashboardIndicatorKey, number> = {
+        overdue: totalActive,
+        recollections: laboratoryItems.length,
+        newResults: visibleItems.length,
+        critical: criticalNotifications.length,
+        totalActive: visibleItems.length
+      };
+      const indicators = (Object.keys(INDICATOR_DEFINITIONS) as DashboardIndicatorKey[]).map((key) => ({
+        key,
+        count: counts[key],
+        denominator: denominators[key],
+        ...INDICATOR_DEFINITIONS[key]
+      }));
+      const window: DashboardWindow = { kind: "CURRENT_STATE", label: "Estado atual", timezone: dashboardTimezone(actor), asOf };
+      return { overdue, recollections, newResults, critical, totalActive, updatedAt: asOf, window, indicators };
     }
   };
 }

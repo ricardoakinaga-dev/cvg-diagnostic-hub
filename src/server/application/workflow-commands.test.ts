@@ -50,6 +50,7 @@ describe("workflow commands", () => {
     const performed = await service.markProcedurePerformed(us, item.id, { expectedVersion: started.item.version, idempotencyKey: "workflow-us-performed" });
     expect(performed.item.status).toBe("AWAITING_REPORT");
     expect(performed.procedure.status).toBe("PERFORMED");
+    expect((await service.timeline(vet, request.id)).items.some((event) => event.entityType === "Procedure")).toBe(true);
   });
 
   it("rejects overlapping schedules and exposes cancellation as an audited state change", async () => {
@@ -75,7 +76,7 @@ describe("workflow commands", () => {
   });
 
   it("keeps released versions immutable through amend, void and replacement release", async () => {
-    const { service, vet, lab, admin } = setup();
+    const { service, vet, lab, manager, store } = setup();
     const request = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-hemogram" }] }, { idempotencyKey: "result-lifecycle-request" });
     const item = request.items[0];
     const received = await service.receiveSample(lab, [item.id], { accessionCode: "ACC-RESULT-1", sampleType: "EDTA", idempotencyKey: "result-lifecycle-receive" });
@@ -84,7 +85,11 @@ describe("workflow commands", () => {
     const released = await service.releaseResult(lab, draft.result.id, { expectedVersion: draft.result.version, idempotencyKey: "result-lifecycle-release" });
     await service.viewResult(vet, released.version.id, { idempotencyKey: "result-lifecycle-view" });
     const reviewed = await service.reviewResult(vet, released.result.id, { versionId: released.version.id, expectedVersion: released.item.version, idempotencyKey: "result-lifecycle-review" });
-    const completed = await service.completeItem(admin, item.id, { expectedVersion: reviewed.item.version, idempotencyKey: "result-lifecycle-complete" });
+    await expect(service.completeItem(manager, item.id, { expectedVersion: reviewed.item.version, idempotencyKey: "result-lifecycle-cross-department" })).rejects.toMatchObject({ code: "SCOPE_DENIED" });
+    await store.transaction((state) => ({ state: { ...state, users: state.users.map((user) => user.id === manager.id ? { ...user, departmentCode: "LABORATORY" } : user) }, result: undefined }));
+    const scopedManager = store.getState().users.find((user) => user.id === manager.id);
+    if (!scopedManager) throw new Error("scoped manager missing");
+    const completed = await service.completeItem(scopedManager, item.id, { expectedVersion: reviewed.item.version, idempotencyKey: "result-lifecycle-complete" });
     expect(completed.item.status).toBe("COMPLETED");
 
     const amended = await service.amendResult(lab, released.result.id, { reason: "Correção de unidade", narrative: "Resultado corrigido.", content: { value: 2 }, idempotencyKey: "result-lifecycle-amend" });
@@ -93,7 +98,7 @@ describe("workflow commands", () => {
     expect(amended.previousVersion.status).toBe("SUPERSEDED");
     const replacement = await service.releaseResult(lab, amended.result.id, { expectedVersion: amended.result.version, idempotencyKey: "result-lifecycle-release-replacement" });
     expect(replacement.version.sequence).toBe(2);
-    const voided = await service.voidResult(admin, replacement.result.id, { reason: "Revisão administrativa", expectedVersion: replacement.result.version, idempotencyKey: "result-lifecycle-void" });
+    const voided = await service.voidResult(manager, replacement.result.id, { reason: "Revisão administrativa", expectedVersion: replacement.result.version, idempotencyKey: "result-lifecycle-void" });
     expect(voided.item.status).toBe("RESULT_VOIDED");
     expect(voided.version.status).toBe("VOIDED");
   });

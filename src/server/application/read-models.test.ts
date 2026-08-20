@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createApplicationService } from "./service";
 import { createDemoState } from "../store/fixtures";
 import { MemoryStore } from "../store/memory-store";
+import type { Notification } from "../domain/models";
 
 describe("authorized read models", () => {
   it("serves scoped catalog, queues, search, timeline and dashboard data", async () => {
@@ -12,11 +13,17 @@ describe("authorized read models", () => {
     if (!actor || !lab) throw new Error("fixture actors missing");
 
     const request = await service.createRequest(actor, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "URGENT", items: [{ serviceId: "service-hemogram" }, { serviceId: "service-xray" }] }, { idempotencyKey: "read-model-request" });
+    const manager = store.getState().users.find((user) => user.email === "manager@cvg.local");
+    const viewer = store.getState().users.find((user) => user.email === "admin@cvg.local");
+    if (!manager || !viewer) throw new Error("management actors missing");
     const services = await service.listServices(actor);
     expect(services.map((entry) => entry.code)).toContain("HEMOGRAM");
     expect((await service.listPatients(actor, "thor")).map((entry) => entry.id)).toEqual(["patient-thor"]);
     expect((await service.listPatients(actor, "does-not-exist"))).toEqual([]);
     expect((await service.getPatient(actor, "patient-thor")).displayName).toBe("Thor");
+    expect((await service.listPatients(manager)).map((entry) => entry.id)).toEqual(["patient-thor"]);
+    await expect(service.getPatient(manager, "patient-mel")).rejects.toMatchObject({ code: "SCOPE_DENIED" });
+    await expect(service.getItem(manager, request.items[0].id)).rejects.toMatchObject({ code: "SCOPE_DENIED" });
     expect((await service.listEncounters(actor, "patient-thor")).map((entry) => entry.id)).toEqual(["encounter-thor"]);
     expect((await service.getEncounter(actor, "encounter-thor")).patientId).toBe("patient-thor");
     expect((await service.getAdmission(actor, "admission-thor")).bed).toBe("Box 03");
@@ -29,27 +36,79 @@ describe("authorized read models", () => {
     expect(labItem.service.code).toBe("HEMOGRAM");
     expect(labItem.request.itemIds).toEqual([request.items[0].id]);
     await expect(service.getItem(lab, request.items[1].id)).rejects.toMatchObject({ code: "SCOPE_DENIED" });
-    expect((await service.timeline(lab, request.id)).length).toBeGreaterThan(0);
+    expect((await service.timeline(lab, request.id)).items.length).toBeGreaterThan(0);
 
     const listed = await service.listRequests(actor, { limit: 1 });
     expect(listed.items[0].id).toBe(request.id);
     expect(listed.total).toBe(1);
-    expect((await service.listRequests(actor, { cursor: Buffer.from("1").toString("base64url") })).items).toEqual([]);
+    await expect(service.listRequests(actor, { cursor: Buffer.from("1").toString("base64url") })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
 
     const queue = await service.listQueue(lab, "LABORATORY", { overdue: false });
     expect(queue[0].requestId).toBe(request.id);
-    expect((await service.search(lab, request.requestCode))[0]?.id).toBe(request.id);
+    expect((await service.search(lab, request.requestCode)).items[0]?.id).toBe(request.id);
     await expect(service.search(actor, "x")).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
-    expect((await service.timeline(actor, request.id)).length).toBeGreaterThan(0);
-    expect((await service.dashboard(actor)).totalActive).toBe(2);
+    expect((await service.timeline(actor, request.id)).items.length).toBeGreaterThan(0);
+    const firstTimelinePage = await service.timeline(actor, request.id, undefined, { limit: 1 });
+    expect(firstTimelinePage.items).toHaveLength(1);
+    expect(firstTimelinePage.nextCursor).toBeTruthy();
+    const secondTimelinePage = await service.timeline(actor, request.id, undefined, { limit: 1, cursor: firstTimelinePage.nextCursor });
+    expect(secondTimelinePage.items[0].id).not.toBe(firstTimelinePage.items[0].id);
+    const dashboard = await service.dashboard(actor);
+    expect(dashboard.totalActive).toBe(2);
+    expect(dashboard.window).toMatchObject({ kind: "CURRENT_STATE", timezone: "America/Sao_Paulo" });
+    expect(dashboard.window.asOf).toBe(dashboard.updatedAt);
+    expect(dashboard.indicators.map((indicator) => indicator.key)).toEqual([
+      "overdue",
+      "recollections",
+      "newResults",
+      "critical",
+      "totalActive"
+    ]);
+    const overdueIndicator = dashboard.indicators.find((indicator) => indicator.key === "overdue");
+    expect(overdueIndicator).toMatchObject({
+      count: dashboard.overdue,
+      denominator: 2,
+      definition: expect.stringContaining("não terminais"),
+      nextAction: expect.stringContaining("fila")
+    });
+    const criticalIndicator = dashboard.indicators.find((indicator) => indicator.key === "critical");
+    expect(criticalIndicator).toMatchObject({
+      count: dashboard.critical,
+      denominator: 0,
+      definition: expect.stringContaining("Notificações críticas")
+    });
+    expect((await service.dashboard(manager)).totalActive).toBe(0);
 
     const received = await service.receiveSample(lab, [request.items[0].id], { accessionCode: "ACC-READ-1", sampleType: "EDTA", idempotencyKey: "read-model-receive" });
     await service.requestRecollection(lab, received.sample.id, { reasonCode: "HEMOLYZED", idempotencyKey: "read-model-recollect" });
     expect((await service.listNotifications(actor, "ACTIONABLE")).length).toBe(1);
     expect((await service.listNotifications(actor, "UNREAD")).length).toBe(1);
     const notification = (await service.listNotifications(actor))[0];
-    await service.acknowledgeNotification(actor, notification.id, { idempotencyKey: "read-model-ack" });
+    await expect(service.acknowledgeNotification(actor, notification.id, {} as never)).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REQUIRED" });
+    await service.acknowledgeNotification(actor, notification.id, { expectedVersion: notification.version, reason: "Confirmei a recoleta no contexto autorizado.", confirm: true, idempotencyKey: "read-model-ack" });
     expect((await service.listNotifications(actor, "UNREAD"))).toHaveLength(0);
+
+    const viewerNotification: Notification = {
+      id: "notification-viewer",
+      category: "ACTIONABLE",
+      priority: "HIGH",
+      recipientUserId: viewer.id,
+      entityType: "REQUEST",
+      entityId: request.id,
+      deepLink: `/requests/${request.id}`,
+      title: "Ação necessária",
+      body: "Confirmação de teste",
+      dedupeKey: "viewer-notification",
+      state: "DELIVERED",
+      createdAt: new Date().toISOString(),
+      attempts: 0,
+      version: 1
+    };
+    await store.transaction((state) => ({ state: { ...state, notifications: [...state.notifications, viewerNotification] }, result: undefined }));
+    await expect(service.acknowledgeNotification(viewer, viewerNotification.id, { expectedVersion: viewerNotification.version, reason: "Confirmação de teste", confirm: true, idempotencyKey: "viewer-ack" })).rejects.toMatchObject({ code: "SCOPE_DENIED" });
+    const foreignNotification = { ...viewerNotification, id: "notification-foreign", entityId: "request-not-found", dedupeKey: "foreign-notification" };
+    await store.transaction((state) => ({ state: { ...state, notifications: [...state.notifications, foreignNotification] }, result: undefined }));
+    await expect(service.acknowledgeNotification(manager, foreignNotification.id, { expectedVersion: foreignNotification.version, reason: "Confirmação de teste", confirm: true, idempotencyKey: "manager-foreign-ack" })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
   it("labels each workflow queue with its next server-side action", async () => {
@@ -87,6 +146,45 @@ describe("authorized read models", () => {
     expect(scheduled.item.status).toBe("SCHEDULED");
   });
 
+  it("counts only released and not-yet-reviewed results as new", async () => {
+    const store = new MemoryStore(createDemoState());
+    const service = createApplicationService(store);
+    const vet = store.getState().users.find((user) => user.email === "vet@cvg.local");
+    const lab = store.getState().users.find((user) => user.email === "lab@cvg.local");
+    if (!vet || !lab) throw new Error("fixture actors missing");
+
+    const request = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-hemogram" }] }, { idempotencyKey: "dashboard-new-result-request" });
+    await service.receiveSample(lab, [request.items[0].id], { accessionCode: "ACC-DASH-NEW", sampleType: "EDTA", idempotencyKey: "dashboard-new-result-receive" });
+    const started = await service.startProcessing(lab, request.items[0].id, { idempotencyKey: "dashboard-new-result-start" });
+    const draft = await service.createResultDraft(lab, request.items[0].id, { narrative: "Dashboard", content: {}, idempotencyKey: "dashboard-new-result-draft" });
+    await service.releaseResult(lab, draft.result.id, { idempotencyKey: "dashboard-new-result-release" });
+    const beforeReview = await service.dashboard(vet);
+    expect(beforeReview.newResults).toBeGreaterThan(0);
+    await service.viewResult(vet, draft.version.id, { idempotencyKey: "dashboard-new-result-view" });
+    await service.reviewResult(vet, draft.result.id, { versionId: draft.version.id, idempotencyKey: "dashboard-new-result-review", expectedVersion: started.item.version + 2 });
+    const afterReview = await service.dashboard(vet);
+    expect(afterReview.newResults).toBe(beforeReview.newResults - 1);
+  });
+
+  it("restricts and audits user role administration", async () => {
+    const store = new MemoryStore(createDemoState());
+    const service = createApplicationService(store);
+    const admin = store.getState().users.find((user) => user.email === "admin@cvg.local");
+    const vet = store.getState().users.find((user) => user.email === "vet@cvg.local");
+    if (!admin || !vet) throw new Error("fixture actors missing");
+    const reauthenticatedAdmin = { ...admin, reauthenticatedAt: new Date().toISOString() };
+
+    expect((await service.listManagedUsers(reauthenticatedAdmin)).find((user) => user.id === vet.id)).toMatchObject({ role: "VETERINARIAN", active: true });
+    await expect(service.listManagedUsers(vet)).rejects.toMatchObject({ code: "SCOPE_DENIED" });
+    const updated = await service.updateUserRole(reauthenticatedAdmin, vet.id, { role: "MANAGER", departmentCode: "INPATIENT", active: true, expectedVersion: 1, reason: "Atualizar acesso operacional", confirm: true, idempotencyKey: "role-admin-update" });
+    expect(updated).toMatchObject({ id: vet.id, role: "MANAGER", departmentCode: "INPATIENT", version: 2 });
+    expect(store.getState().auditEvents.at(-1)?.eventType).toBe("UserRoleUpdated");
+    await expect(service.updateUserRole(reauthenticatedAdmin, vet.id, { role: "VIEWER", departmentCode: "INPATIENT", expectedVersion: 1, reason: "Atualizar acesso operacional", confirm: true, idempotencyKey: "role-stale-update" })).rejects.toMatchObject({ code: "STALE_VERSION" });
+    await expect(service.updateUserRole(reauthenticatedAdmin, admin.id, { role: "VIEWER", departmentCode: "IT", active: true, expectedVersion: 1, reason: "Alteração indevida", confirm: true, idempotencyKey: "role-self-update" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(service.updateUserRole(reauthenticatedAdmin, vet.id, { role: "VIEWER", departmentCode: "INPATIENT", reason: "Sem versão", confirm: true, idempotencyKey: "role-missing-version" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(service.updateUserRole(reauthenticatedAdmin, vet.id, { role: "VIEWER", departmentCode: "INPATIENT", expectedVersion: 2, reason: undefined as never, confirm: true, idempotencyKey: "role-missing-reason" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
   it("rejects invalid pagination at the application boundary", async () => {
     const store = new MemoryStore(createDemoState());
     const service = createApplicationService(store);
@@ -95,5 +193,78 @@ describe("authorized read models", () => {
 
     await expect(service.getPatientDiagnostics(manager, "patient-thor", { limit: 0 })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(service.listAuditEvents(manager, { limit: 101 })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(service.listRequests(manager, { status: "NOT_A_STATUS" as never })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(service.listRequests(manager, { priority: "NOT_A_PRIORITY" as never })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("applies request list filters before cursor pagination", async () => {
+    const store = new MemoryStore(createDemoState());
+    const service = createApplicationService(store);
+    const vet = store.getState().users.find((user) => user.email === "vet@cvg.local");
+    if (!vet) throw new Error("fixture actor missing");
+
+    const request = await service.createRequest(vet, {
+      patientId: "patient-thor",
+      encounterId: "encounter-thor",
+      priority: "EMERGENCY",
+      items: [{ serviceId: "service-hemogram" }, { serviceId: "service-xray" }]
+    }, { idempotencyKey: "read-filter-request" });
+    const from = new Date(Date.now() - 60_000).toISOString();
+    const to = new Date(Date.now() + 60_000).toISOString();
+
+    const filtered = await service.listRequests(vet, {
+      priority: "EMERGENCY",
+      serviceId: "service-hemogram",
+      overdue: false,
+      from,
+      to,
+      limit: 1
+    });
+    expect(filtered.items.map((entry) => entry.id)).toEqual([request.id]);
+    expect(filtered.total).toBe(1);
+    expect((await service.listRequests(vet, { serviceId: "service-does-not-exist" })).items).toEqual([]);
+    await expect(service.listRequests(vet, { from: to, to: from })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(service.listRequests(vet, { from: "not-a-date" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("searches authorized tutor, sector and professional fields with stable cursors", async () => {
+    const store = new MemoryStore(createDemoState());
+    const service = createApplicationService(store);
+    const vet = store.getState().users.find((user) => user.email === "vet@cvg.local");
+    if (!vet) throw new Error("fixture actor missing");
+
+    const request = await service.createRequest(vet, {
+      patientId: "patient-thor",
+      encounterId: "encounter-thor",
+      priority: "URGENT",
+      items: [{ serviceId: "service-hemogram" }]
+    }, { idempotencyKey: "search-fields-request" });
+    await service.createRequest(vet, {
+      patientId: "patient-thor",
+      encounterId: "encounter-thor",
+      priority: "ROUTINE",
+      items: [{ serviceId: "service-xray" }]
+    }, { idempotencyKey: "search-fields-request-2" });
+
+    expect((await service.search(vet, "Oliveira")).items.map((entry) => entry.id)).toContain(request.id);
+    expect((await service.search(vet, "LABORATORY", { types: ["ITEM"] })).items[0]).toMatchObject({ type: "ITEM", deepLink: expect.stringContaining(`/requests/${request.id}#`) });
+    expect((await service.search(vet, "vet@cvg.local")).items.map((entry) => entry.id)).toContain(request.id);
+
+    const firstPage = await service.search(vet, "thor", { limit: 1 });
+    expect(firstPage.items).toHaveLength(1);
+    expect(firstPage.nextCursor).toBeTruthy();
+    const secondPage = await service.search(vet, "thor", { limit: 1, cursor: firstPage.nextCursor });
+    expect(secondPage.items.every((entry) => entry.id !== firstPage.items[0].id)).toBe(true);
+    const stableFirstPage = await service.search(vet, "thor", { limit: 1 });
+    const stableFirstId = stableFirstPage.items[0].id;
+    await service.createRequest(vet, {
+      patientId: "patient-thor",
+      encounterId: "encounter-thor",
+      priority: "ROUTINE",
+      items: [{ serviceId: "service-ultrasound" }]
+    }, { idempotencyKey: "search-stable-insert" });
+    const stableSecondPage = await service.search(vet, "thor", { limit: 1, cursor: stableFirstPage.nextCursor });
+    expect(stableSecondPage.items[0]?.id).not.toBe(stableFirstId);
+    await expect(service.search(vet, "thor", { status: "NOT_A_STATUS" as never })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 });

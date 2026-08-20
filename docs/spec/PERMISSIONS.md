@@ -10,7 +10,7 @@ Authorization is evaluated server-side as:
 can(actor, action, resource, scope, current_state, policy_version)
 ```
 
-Authentication alone never grants access. Scope is the intersection of role assignment, department/service responsibility, patient/encounter care relationship and explicit manager/admin permissions. Deny by default; the UI may hide unavailable actions but the API must enforce them again.
+Authentication alone never grants access. Scope is the intersection of role assignment, department/service responsibility, patient/encounter care relationship and explicit manager permissions. Deny by default; the UI may hide unavailable actions but the API must enforce them again. In the local boundary, `ADMIN` is a technical/configuration role: it has no clinical command permissions and cannot enter patient scope. A future break-glass path must be separately approved, time-limited, reasoned and audited.
 
 ## 1.1 Canonical permission identifiers
 
@@ -58,7 +58,7 @@ The following identifiers are the authorization contract used by the API specifi
 | `sla_policy.manage` | Manage SLA policies | admin/manager policy |
 | `critical_result_policy.manage` | Manage critical-result policies | admin/manager policy |
 | `reason_code.manage` | Manage reason codes | admin/manager policy |
-| `user_role.manage` | Assign/revoke user roles | admin/delegated manager |
+| `user_role.manage` | Assign/revoke user roles | admin; delegated manager requires explicit scope/owner decision |
 | `queue.view` | View operational queue | DEPARTMENT |
 | `dashboard.view` | View operational indicators | DEPARTMENT/manager |
 | `diagnostic.timeline.view` | View patient diagnostic timeline | CARE/assigned |
@@ -73,8 +73,8 @@ The following identifiers are the authorization contract used by the API specifi
 
 | Role | Default responsibility | Default scope |
 | --- | --- | --- |
-| `ADMIN` | identity, system configuration and break-glass support | technical; no clinical edit by implication |
-| `MANAGER` | operational queues, overrides, configuration delegated by policy | assigned department/site |
+| `ADMIN` | identity and system configuration | technical; no clinical command or patient scope locally |
+| `MANAGER` | operational queues, overrides, configuration delegated by policy | assigned department/site; request/item access is department-scoped |
 | `VETERINARIAN` | request, view and review for care scope | assigned patients/encounters/departments |
 | `INPATIENT_TEAM` | request/view/review for admitted patients | assigned ward/department |
 | `LAB_TECH` | receive/process/recollect/release lab work | Laboratory |
@@ -90,10 +90,10 @@ Legend: `✓` allowed within scope and state; `△` allowed only with extra cond
 
 | Action | ADMIN | MANAGER | VET | INPATIENT | LAB | RADIOLOGY | ULTRASOUND | VIEWER |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Search authorized resources | △ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Create diagnostic request | △ | △ | ✓ | ✓ | △ | △ | △ | — |
+| Search authorized resources | — (break-glass only) | ✓ assigned scope | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Create diagnostic request | — (break-glass only) | △ | ✓ | ✓ | △ | △ | △ | — |
 | Override duplicate warning | △ | ✓ | △ reason | △ reason | △ | △ | △ | — |
-| View request/item | △ | ✓ | ✓ care | ✓ ward | ✓ lab | ✓ imaging | ✓ imaging | ✓ assigned |
+| View request/item | — (break-glass only) | ✓ assigned department | ✓ care | ✓ ward | ✓ lab | ✓ imaging | ✓ imaging | ✓ assigned |
 | Receive lab sample | — | △ | — | — | ✓ | — | — |
 | Start lab processing | — | △ | — | — | ✓ | — | — |
 | Request lab recollection | — | △ | — | — | ✓ | — | — |
@@ -103,16 +103,16 @@ Legend: `✓` allowed within scope and state; `△` allowed only with extra cond
 | Create result draft | — | △ | — | — | ✓ lab | ✓ RX | ✓ US |
 | Edit own result draft | — | △ | — | — | ✓ before release | ✓ before release | ✓ before release |
 | Release result/report | — | △ override | — | — | ✓ own service | ✓ own service | ✓ own service |
-| Amend released result | △ support | ✓ policy | — | — | △ owner | △ owner | △ owner |
-| Void released result | △ support | ✓ policy | — | — | △ owner/policy | △ owner/policy | △ owner/policy |
+| Amend released result | — (break-glass only) | ✓ policy/department | — | — | △ owner | △ owner | △ owner |
+| Void released result | — (break-glass only) | ✓ policy/department | — | — | △ owner/policy | △ owner/policy | △ owner/policy |
 | Create attachment upload session | — | △ | — | — | ✓ own result | ✓ own result | ✓ own result |
 | Finalize attachment/upload scan | — | △ | — | — | ✓ own result | ✓ own result | ✓ own result |
-| Download attachment | △ | ✓ | ✓ scope | ✓ scope | ✓ service | ✓ service | ✓ service | — |
-| View attachment | △ | ✓ | ✓ scope | ✓ scope | ✓ service | ✓ service | ✓ service |
-| View result | △ | ✓ | ✓ care | ✓ ward | ✓ service | ✓ service | ✓ service |
-| Record result view | △ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Review result | △ | △ | ✓ | ✓ if policy | — | — | — |
-| Acknowledge critical notification | △ | ✓ | ✓ recipient | ✓ recipient | ✓ recipient | ✓ recipient | ✓ recipient | △ assigned |
+| Download attachment | — | ✓ | ✓ scope | ✓ scope | ✓ service | ✓ service | ✓ service | — |
+| View attachment | — | ✓ | ✓ scope | ✓ scope | ✓ service | ✓ service | ✓ service |
+| View result | — | ✓ | ✓ care | ✓ ward | ✓ service | ✓ service | ✓ service |
+| Record result view | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Review result | — | △ | ✓ | ✓ if policy | — | — | — |
+| Acknowledge critical notification | — | ✓ | ✓ recipient | ✓ recipient | ✓ recipient | ✓ recipient | ✓ recipient | — |
 | Cancel before execution | △ | ✓ | △ requester | △ requester | △ service | △ service | △ service | — |
 | Cancel/reject after start | △ support | ✓ policy | —/△ | —/△ | △ manager | △ manager | △ manager | — |
 | Complete item manually | △ | △ policy | — | — | — | — | — | — |
@@ -132,9 +132,11 @@ The matrix is a starting policy, not a claim of current hospital authorization. 
 - `SITE`: future boundary; single-site MVP uses one configured site but does not assume multi-tenant behavior.
 - `BREAK_GLASS`: time-limited, reason-required, audited access; must not be enabled by default.
 
+The local implementation does not expose `BREAK_GLASS`. Managers can see a patient/request only when the request's requesting department or an item's executor department matches their assigned department; request views redact items outside that department, and queue/search/dashboard results are filtered at item scope.
+
 ## 5. Sensitive actions
 
-Require confirmation/reason and server version: release, amend, void, cancel after receipt/start, reject sample, override duplicate, acknowledge critical, role/config change, export and deletion/archive. Do not put a confirmation modal on harmless navigation or view actions.
+Require confirmation/reason and server version: release, amend, void, cancel after receipt/start, reject sample, override duplicate, notification acknowledgement (including critical), role/config change, export and deletion/archive. Notification acknowledgement requires `expectedVersion`, a non-empty reason, explicit `confirm: true` and an idempotency key. Role changes additionally require recent password reauthentication, `expectedVersion`, a non-empty reason and an explicit confirmation. Do not put a confirmation modal on harmless navigation or view actions.
 
 ## 6. Authorization failure behavior
 

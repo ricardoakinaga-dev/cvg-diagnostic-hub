@@ -36,4 +36,11 @@ describe("server authorization", () => {
     expect(hasPermissionForUser(viewer, "request.view")).toBe(true);
     expect(hasPermissionForUser({ ...viewer, active: false }, "request.view")).toBe(false);
   });
+
+  it("keeps technical administrators out of clinical commands and patient scope", () => {
+    const admin = { id: "admin", role: "ADMIN" as const, departmentCode: "IT", active: true };
+    expect(hasPermission("ADMIN", "sample.receive")).toBe(false);
+    expect(canAccessResource(admin, "patient.view", { patientId: "patient-1" })).toBe(false);
+    expect(canAccessResource(admin, "health.readiness", {})).toBe(true);
+  });
 });

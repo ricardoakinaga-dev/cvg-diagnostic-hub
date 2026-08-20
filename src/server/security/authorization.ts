@@ -39,31 +39,8 @@ const commonRead: Permission[] = [
 
 export const rolePermissions: Record<RoleCode, readonly Permission[]> = {
   ADMIN: [
-    ...commonRead,
-    "request.create",
-    "request.cancel",
-    "request.duplicate_override",
-    "item.cancel",
-    "item.reject",
-    "item.complete",
-    "result.draft.create",
-    "result.draft.edit_own",
-    "result.release",
-    "result.amend",
-    "result.void",
-    "result.review",
-    "attachment.download",
-    "notification.acknowledge",
-    "attachment.upload_session",
-    "attachment.finalize",
-    "procedure.schedule",
-    "procedure.reschedule",
-    "procedure.start",
-    "procedure.mark_performed",
-    "sample.receive",
-    "sample.process",
-    "sample.recollection.request",
-    "sample.replacement.receive",
+    "service.catalog.view",
+    "realtime.connect",
     "service.catalog.manage",
     "sla_policy.manage",
     "critical_result_policy.manage",
@@ -190,7 +167,10 @@ export function canAccessResource(
   }
 
   if (actor.role === "ADMIN") {
-    return true;
+    // The technical role may operate platform/configuration resources, but
+    // cannot enter patient scope without an explicitly approved break-glass
+    // capability that is not part of this local boundary.
+    return !resource.patientId;
   }
 
   if (resource.ownerId && resource.ownerId === actor.id) {
@@ -219,8 +199,10 @@ export function canAccessResource(
     return resource.patientId ? Boolean(actor.patientIds?.includes(resource.patientId)) : true;
   }
 
-  if (resource.departmentCode && actor.role === "MANAGER") {
-    return resource.departmentCode === actor.departmentCode;
+  if (actor.role === "MANAGER") {
+    if (resource.departmentCode) return resource.departmentCode === actor.departmentCode;
+    if (resource.patientId) return false;
+    return true;
   }
 
   return true;

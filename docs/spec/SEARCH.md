@@ -22,13 +22,13 @@ Global search must find a request without knowing the patient and must prevent a
 
 ## 3. API behavior
 
-`GET /api/v1/search?q=&types=&status=&department=&from=&to=&cursor=&limit=`
+`GET /api/v1/search?q=&types=REQUEST,ITEM&status=&departmentCode=&from=&to=&cursor=&limit=` (`department` remains a backwards-compatible route alias)
 
 - minimum query length for text is configurable; exact protocol/accession may bypass it;
-- default `limit=25`, max `100`; cursor pagination stable by relevance then `created_at,id`;
+- default `limit=25`, max `100`; cursor pagination is keyset-based and stable by relevance then `updatedAt,id`; the opaque cursor represents the last `rank,updatedAt,id` tuple;
 - exact `request_code` returns request first and related items summary;
 - empty search is rejected or scoped to queue endpoints, never returns thousands of rows;
-- result cards include type, safe label, context, status, priority, updated time and deep link;
+- result cards include type, safe label, patient context, status, priority, department, updated time and deep link; the response exposes `meta.nextCursor`, `meta.limit` and `meta.total`;
 - server authorization is applied before ranking/counting to avoid existence leaks.
 
 ## 4. Ranking

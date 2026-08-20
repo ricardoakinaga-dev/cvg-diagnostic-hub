@@ -12,14 +12,14 @@
 | Milestone | Status | Evidence | Remaining gate |
 | --- | --- | --- | --- |
 | M0 Foundation | implemented locally | Next 16 app/proxy, contracts, envelope, health, incremental migrations, seed, lint/typecheck/build | CI execution and approved production configuration |
-| M1 Identity/registry | implemented locally | opaque session, scrypt password hash, CSRF, RBAC/scope, patient/encounter/admission reads | hospital IdP, ownership and transfer/alta policy |
+| M1 Identity/registry | implemented locally | opaque session, scrypt password hash, CSRF, RBAC/scope, patient/encounter/admission reads, safe ADMIN-only user/role administration | hospital IdP, ownership, delegated-manager scope and transfer/alta policy |
 | M2 Requests | implemented | multi-item request, protocol sequence, duplicate warning/override, idempotency, audit/outbox | transfer/alta commands remain policy-gated |
 | M3 Laboratory | implemented | receive, one-sample/many-item, processing, rejection, recollection/replacement, queue | equipment integration and pilot SLA validation |
 | M4 Imaging | implemented | RX direct procedure path, US schedule/reschedule/start/perform, conflict/history | scheduling policy and real modality integration |
 | M5 Results/files | implemented locally | draft edit, release/review/amend/void, immutable versions, checksum/MIME/quarantine/private download, local/S3-compatible factory | external AV, production bucket/credentials and critical policy |
 | M6 Notifications/realtime | implemented locally; conditional | transactional intents, inbox/ack, leased outbox worker, bounded sink, SSE heartbeat/replay/resync/expiry and UI refetch | approved critical fallback/escalation and production broker/worker topology |
-| M7 Operations | implemented locally | scoped search, cursor lists, queues/next action, timeline, dashboard, bounded metrics and perf smoke | representative hospital load and database query plan review |
-| M8 Hardening | implemented locally; conditional | 93 Vitest tests, 94.39% statement coverage, 80.3% branches, PostgreSQL/restore smoke, 21 browser E2E, explicit accessibility suite, CI workflow, audit/secret scan | manual accessibility/clinical acceptance, remote CI execution and pilot sign-off |
+| M7 Operations | implemented locally | scoped search with typed results/filters, cursor lists for requests/timeline, queues/next action, dashboard indicator definitions, bounded metrics and four-route perf smoke | representative hospital load and database query plan review |
+| M8 Hardening | implemented locally; conditional | 107 Vitest tests, 95.4% statement coverage, 81.01% branches, PostgreSQL/restore smoke, 21 browser E2E, explicit accessibility suite 6/6, OpenAPI 47 paths, production perf smoke (400 requests, max p95 434.69 ms), audit/secret scan | object-storage restore, manual accessibility/clinical acceptance, remote CI execution and pilot sign-off |
 
 The implementation is a single Next.js modular monolith under `src/` plus `packages/contracts`; the original `apps/*` ownership in the planning notes is a target boundary, not a claim that those directories exist. The runtime intentionally remains synthetic/local and must not be presented as hospital-approved.
 

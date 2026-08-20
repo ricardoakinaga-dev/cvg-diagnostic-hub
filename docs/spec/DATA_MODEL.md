@@ -75,7 +75,7 @@ Do not enforce unique request+service blindly: duplicate override can be clinica
 
 | Table | Fields/meaning | Constraints/indexes |
 | --- | --- | --- |
-| `notifications` | id, category, priority, recipient_user/team, entity_type/id, deep_link, dedupe_key, state, created_at, expires_at | dedupe unique per event/recipient/version |
+| `notifications` | id, category, priority, recipient_user/team, entity_type/id, deep_link, dedupe_key, state, version, created_at, expires_at | dedupe unique per event/recipient/version; acknowledgement uses optimistic version, reason and explicit confirmation |
 | `notification_deliveries` | notification_id, channel (`IN_APP` MVP), status, attempts, last_error, sent/seen_at | unique notification+channel |
 | `acknowledgements` | notification_id, result_version_id?, actor_id, acknowledged_at, method | one current acknowledgement per recipient/version; history as audit |
 | `audit_events` | id, event_type, actor_id/system, entity_type/id, previous_state, new_state, correlation_id, metadata allowlist, occurred_at | append-only permissions; indexes entity/time/correlation |

@@ -34,6 +34,8 @@ describe("versioned API boundary", () => {
 
     expect(response.status).toBe(200);
     expect(body.data.status).toBe("ok");
+    expect(body).not.toHaveProperty("success");
+    expect(body.meta).toMatchObject({ requestId: expect.any(String), correlationId: expect.any(String) });
     expect(response.headers.get("x-correlation-id")).toBeTruthy();
   });
 
@@ -84,6 +86,34 @@ describe("versioned API boundary", () => {
 
     const vet = await login();
     const denied = await GET(new Request("http://localhost/api/v1/diagnostic-services?includeInactive=true", { headers: { cookie: vet.cookie } }), params(["diagnostic-services"]));
+    expect(denied.status).toBe(404);
+  });
+
+  it("supports audited role administration without exposing password hashes", async () => {
+    const admin = await login("admin@cvg.local");
+    const users = await GET(new Request("http://localhost/api/v1/users", { headers: { cookie: admin.cookie } }), params(["users"]));
+    expect(users.status).toBe(200);
+    const usersBody = await users.json();
+    expect(usersBody.data.find((user: { email: string }) => user.email === "vet@cvg.local")).toMatchObject({ createdAt: expect.any(String), timezone: "America/Sao_Paulo" });
+    expect(usersBody.data.find((user: { email: string }) => user.email === "vet@cvg.local")).not.toHaveProperty("passwordHash");
+
+    const reauth = await POST(new Request("http://localhost/api/v1/session/reauth", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: admin.cookie, "x-csrf-token": admin.csrf },
+      body: JSON.stringify({ password: "api-test-password" })
+    }), params(["session", "reauth"]));
+    expect(reauth.status).toBe(200);
+
+    const updated = await POST(new Request("http://localhost/api/v1/users/user-vet/roles", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: admin.cookie, "x-csrf-token": admin.csrf, "idempotency-key": "api-role-update" },
+      body: JSON.stringify({ role: "MANAGER", departmentCode: "INPATIENT", active: true, expectedVersion: 1, reason: "Atualizar acesso operacional", confirm: true })
+    }), params(["users", "user-vet", "roles"]));
+    expect(updated.status).toBe(200);
+    expect((await updated.json()).data).toMatchObject({ role: "MANAGER", version: 2 });
+
+    const vet = await login();
+    const denied = await GET(new Request("http://localhost/api/v1/users", { headers: { cookie: vet.cookie } }), params(["users"]));
     expect(denied.status).toBe(404);
   });
 
@@ -142,6 +172,17 @@ describe("versioned API boundary", () => {
     expect(body.error.code).toBe("VALIDATION_ERROR");
   });
 
+  it("requires versioned reasoned confirmation for notification acknowledgement", async () => {
+    const auth = await login();
+    const response = await POST(new Request("http://localhost/api/v1/notifications/notification-missing/acknowledge", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: auth.cookie, "x-csrf-token": auth.csrf, "idempotency-key": "missing-notification-ack" },
+      body: JSON.stringify({})
+    }), params(["notifications", "notification-missing", "acknowledge"]));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("VALIDATION_ERROR");
+  });
+
   it("exposes bounded metrics only to readiness-capable administrators", async () => {
     const admin = await login("admin@cvg.local");
     const response = await GET(new Request("http://localhost/api/v1/metrics", { headers: { cookie: admin.cookie } }), params(["metrics"]));
@@ -171,6 +212,76 @@ describe("versioned API boundary", () => {
     expect(await inactive.text()).toContain("cvg_sse_connections 0");
   });
 
+  it("closes an existing SSE stream after the actor role is changed", async () => {
+    const vet = await login();
+    const admin = await login("admin@cvg.local");
+    const previousInterval = process.env.REALTIME_STREAM_INTERVAL_MS;
+    process.env.REALTIME_STREAM_INTERVAL_MS = "10";
+    try {
+      const stream = await GET(new Request("http://localhost/api/v1/realtime/events", { headers: { cookie: vet.cookie } }), params(["realtime", "events"]));
+      const reader = stream.body?.getReader();
+      expect(reader).toBeTruthy();
+      await reader!.read();
+
+      const reauth = await POST(new Request("http://localhost/api/v1/session/reauth", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: admin.cookie, "x-csrf-token": admin.csrf },
+        body: JSON.stringify({ password: "api-test-password" })
+      }), params(["session", "reauth"]));
+      expect(reauth.status).toBe(200);
+      const updated = await POST(new Request("http://localhost/api/v1/users/user-vet/roles", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: admin.cookie, "x-csrf-token": admin.csrf, "idempotency-key": "sse-role-revocation" },
+        body: JSON.stringify({ role: "MANAGER", departmentCode: "INPATIENT", active: true, expectedVersion: 1, reason: "Revogar autorização antiga da conexão", confirm: true })
+      }), params(["users", "user-vet", "roles"]));
+      expect(updated.status).toBe(200);
+
+      let done = false;
+      for (let attempt = 0; attempt < 10 && !done; attempt += 1) {
+        const result = await Promise.race([
+          reader!.read(),
+          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 30))
+        ]);
+        if (result && "done" in result) done = result.done;
+      }
+      expect(done).toBe(true);
+    } finally {
+      if (previousInterval === undefined) delete process.env.REALTIME_STREAM_INTERVAL_MS;
+      else process.env.REALTIME_STREAM_INTERVAL_MS = previousInterval;
+    }
+  });
+
+  it("closes an existing SSE stream after the session is revoked", async () => {
+    const vet = await login();
+    const previousInterval = process.env.REALTIME_STREAM_INTERVAL_MS;
+    process.env.REALTIME_STREAM_INTERVAL_MS = "10";
+    try {
+      const stream = await GET(new Request("http://localhost/api/v1/realtime/events", { headers: { cookie: vet.cookie } }), params(["realtime", "events"]));
+      const reader = stream.body?.getReader();
+      expect(reader).toBeTruthy();
+      await reader!.read();
+
+      const logout = await POST(new Request("http://localhost/api/v1/session/logout", {
+        method: "POST",
+        headers: { cookie: vet.cookie, "x-csrf-token": vet.csrf }
+      }), params(["session", "logout"]));
+      expect(logout.status).toBe(200);
+
+      let done = false;
+      for (let attempt = 0; attempt < 10 && !done; attempt += 1) {
+        const result = await Promise.race([
+          reader!.read(),
+          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 30))
+        ]);
+        if (result && "done" in result) done = result.done;
+      }
+      expect(done).toBe(true);
+    } finally {
+      if (previousInterval === undefined) delete process.env.REALTIME_STREAM_INTERVAL_MS;
+      else process.env.REALTIME_STREAM_INTERVAL_MS = previousInterval;
+    }
+  });
+
   it("rejects an attachment body after reading it when content-length is absent or false", async () => {
     const auth = await login();
     process.env.ATTACHMENT_MAX_BYTES = "10";
@@ -198,6 +309,44 @@ describe("versioned API boundary", () => {
 
     expect(response.status).toBe(400);
     expect(body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("validates and applies request query filters at the HTTP boundary", async () => {
+    const auth = await login();
+    const create = await POST(new Request("http://localhost/api/v1/diagnostic-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: auth.cookie, "x-csrf-token": auth.csrf, "idempotency-key": "api-filter-request" },
+      body: JSON.stringify({ patientId: "patient-thor", encounterId: "encounter-thor", priority: "EMERGENCY", items: [{ serviceId: "service-hemogram" }] })
+    }), params(["diagnostic-requests"]));
+    expect(create.status).toBe(201);
+
+    const filtered = await GET(new Request("http://localhost/api/v1/diagnostic-requests?departmentId=LABORATORY&priority=EMERGENCY&serviceId=service-hemogram&overdue=false&limit=10", { headers: { cookie: auth.cookie } }), params(["diagnostic-requests"]));
+    expect(filtered.status).toBe(200);
+    expect((await filtered.json()).data).toHaveLength(1);
+
+    const invalid = await GET(new Request("http://localhost/api/v1/diagnostic-requests?priority=NOT_A_PRIORITY", { headers: { cookie: auth.cookie } }), params(["diagnostic-requests"]));
+    expect(invalid.status).toBe(400);
+    expect((await invalid.json()).error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("returns scoped search results with cursor metadata and validates filters", async () => {
+    const auth = await login();
+    const create = await POST(new Request("http://localhost/api/v1/diagnostic-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: auth.cookie, "x-csrf-token": auth.csrf, "idempotency-key": "api-search-request" },
+      body: JSON.stringify({ patientId: "patient-thor", encounterId: "encounter-thor", priority: "URGENT", items: [{ serviceId: "service-hemogram" }] })
+    }), params(["diagnostic-requests"]));
+    expect(create.status).toBe(201);
+
+    const response = await GET(new Request("http://localhost/api/v1/search?q=Oliveira&types=REQUEST&department=LABORATORY&limit=1", { headers: { cookie: auth.cookie } }), params(["search"]));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.data[0]).toMatchObject({ type: "REQUEST", patient: "Thor", priority: "URGENT" });
+    expect(body.meta.limit).toBe(1);
+
+    const invalid = await GET(new Request("http://localhost/api/v1/search?q=Thor&status=NOT_A_STATUS", { headers: { cookie: auth.cookie } }), params(["search"]));
+    expect(invalid.status).toBe(400);
+    expect((await invalid.json()).error.code).toBe("VALIDATION_ERROR");
   });
 
   it("rejects invalid queue limits at the HTTP boundary", async () => {
@@ -236,12 +385,32 @@ describe("versioned API boundary", () => {
     expect(diagnostics.status).toBe(200);
     expect((await diagnostics.json()).data.items).toHaveLength(1);
 
+    const timeline = await GET(new Request(`http://localhost/api/v1/timeline?requestId=${JSON.parse(await create.clone().text()).data.id}&limit=1`, {
+      headers: { cookie: vet.cookie }
+    }), params(["timeline"]));
+    expect(timeline.status).toBe(200);
+    expect((await timeline.json()).meta.limit).toBe(1);
+
     const manager = await login("manager@cvg.local");
     const audit = await GET(new Request("http://localhost/api/v1/audit-events?limit=10", {
       headers: { cookie: manager.cookie }
     }), params(["audit-events"]));
     expect(audit.status).toBe(200);
     expect((await audit.json()).data.length).toBeGreaterThan(0);
+  });
+
+  it("returns the dashboard indicator contract with scope metadata", async () => {
+    const manager = await login("manager@cvg.local");
+    const response = await GET(new Request("http://localhost/api/v1/dashboard", { headers: { cookie: manager.cookie } }), params(["dashboard"]));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data.window).toMatchObject({ kind: "CURRENT_STATE", timezone: "America/Sao_Paulo" });
+    expect(body.data.window.asOf).toBe(body.data.updatedAt);
+    expect(body.data.indicators).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "overdue", definition: expect.any(String), denominator: expect.any(Number), nextAction: expect.any(String) }),
+      expect.objectContaining({ key: "critical", definition: expect.any(String), denominator: expect.any(Number), nextAction: expect.any(String) })
+    ]));
   });
 
   it("serves a scoped report with attachment metadata after release", async () => {

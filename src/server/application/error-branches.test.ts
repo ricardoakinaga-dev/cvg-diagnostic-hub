@@ -27,6 +27,7 @@ describe("server-side validation and conflict branches", () => {
     const us = store.getState().users.find((user) => user.email === "us@cvg.local");
     if (!vet || !lab || !us) throw new Error("fixture actors missing");
     const labRequest = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-hemogram" }] }, { idempotencyKey: "error-lab-request" });
+    await expect(service.receiveSample(vet, [labRequest.items[0].id], { accessionCode: "ACC-UNAUTHORIZED", sampleType: "EDTA", idempotencyKey: "unauthorized-sample" })).rejects.toMatchObject({ code: "SCOPE_DENIED" });
     await expect(service.receiveSample(lab, [], { accessionCode: "ACC-ERR", sampleType: "EDTA" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(service.requestRecollection(lab, "sample-missing", { reasonCode: "HEMOLYZED", idempotencyKey: "missing-recollect" })).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(service.createResultDraft(lab, labRequest.items[0].id, { narrative: "Ainda não", content: {} })).rejects.toMatchObject({ code: "RESULT_RELEASE_BLOCKED" });
@@ -36,6 +37,7 @@ describe("server-side validation and conflict branches", () => {
     await expect(service.listQueue(vet, "LABORATORY")).rejects.toMatchObject({ code: "NOT_FOUND" });
 
     const usRequest = await service.createRequest(vet, { patientId: "patient-mel", encounterId: "encounter-mel", priority: "ROUTINE", items: [{ serviceId: "service-ultrasound" }] }, { idempotencyKey: "error-us-request" });
+    await expect(service.timeline(vet, labRequest.id, usRequest.items[0].id)).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(service.scheduleProcedure(us, usRequest.items[0].id, { startsAt: "bad", endsAt: "also-bad", resource: "US-ERR" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(service.scheduleProcedure(us, usRequest.items[0].id, { startsAt: "2026-08-25T10:00:00.000Z", endsAt: "2026-08-27T11:00:00.000Z", resource: "US-ERR" })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
@@ -80,16 +82,31 @@ describe("server-side validation and conflict branches", () => {
     const draft = await service.createResultDraft(lab, request.items[0].id, { narrative: "Resultado sensível.", content: {}, conclusion: "Necessita avaliação", idempotencyKey: "critical-draft" });
     await expect(service.releaseResult(lab, draft.result.id, { critical: true, idempotencyKey: "critical-release" })).rejects.toMatchObject({ code: "CRITICAL_POLICY_MISSING" });
     const previousPolicyFlag = process.env.CRITICAL_POLICY_ENABLED;
+    const previousPolicyVersion = process.env.CRITICAL_POLICY_VERSION;
+    const previousPolicyApprovalRef = process.env.CRITICAL_POLICY_APPROVAL_REF;
+    const previousPolicyApprovedAt = process.env.CRITICAL_POLICY_APPROVED_AT;
     process.env.CRITICAL_POLICY_ENABLED = "true";
     try {
       await expect(service.releaseResult(lab, draft.result.id, { critical: true, idempotencyKey: "critical-release-bare-flag" })).rejects.toMatchObject({ code: "CRITICAL_POLICY_MISSING" });
+      await expect(service.viewResult(vet, draft.version.id, { idempotencyKey: "draft-view" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(service.reviewResult(vet, draft.result.id, { versionId: draft.version.id, idempotencyKey: "draft-review" })).rejects.toMatchObject({ code: "REVIEW_STALE" });
+      await expect(service.amendResult(lab, draft.result.id, { reason: "Ainda draft", narrative: "Nova versão", content: {}, idempotencyKey: "draft-amend" })).rejects.toMatchObject({ code: "INVALID_STATE_TRANSITION" });
+      await expect(service.voidResult(lab, draft.result.id, { reason: "Ainda draft", idempotencyKey: "draft-void" })).rejects.toMatchObject({ code: "INVALID_STATE_TRANSITION" });
+      process.env.CRITICAL_POLICY_VERSION = "policy-v1";
+      process.env.CRITICAL_POLICY_APPROVAL_REF = "approval-test-1";
+      process.env.CRITICAL_POLICY_APPROVED_AT = "2026-08-20T10:00:00.000Z";
+      const released = await service.releaseResult(lab, draft.result.id, { critical: true, idempotencyKey: "critical-release-approved" });
+      expect(released.version).toMatchObject({ status: "RELEASED", critical: true });
+      expect(store.getState().notifications).toContainEqual(expect.objectContaining({ category: "CRITICAL", entityId: released.version.id }));
     } finally {
       if (previousPolicyFlag === undefined) delete process.env.CRITICAL_POLICY_ENABLED;
       else process.env.CRITICAL_POLICY_ENABLED = previousPolicyFlag;
+      if (previousPolicyVersion === undefined) delete process.env.CRITICAL_POLICY_VERSION;
+      else process.env.CRITICAL_POLICY_VERSION = previousPolicyVersion;
+      if (previousPolicyApprovalRef === undefined) delete process.env.CRITICAL_POLICY_APPROVAL_REF;
+      else process.env.CRITICAL_POLICY_APPROVAL_REF = previousPolicyApprovalRef;
+      if (previousPolicyApprovedAt === undefined) delete process.env.CRITICAL_POLICY_APPROVED_AT;
+      else process.env.CRITICAL_POLICY_APPROVED_AT = previousPolicyApprovedAt;
     }
-    await expect(service.viewResult(vet, draft.version.id, { idempotencyKey: "draft-view" })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    await expect(service.reviewResult(vet, draft.result.id, { versionId: draft.version.id, idempotencyKey: "draft-review" })).rejects.toMatchObject({ code: "REVIEW_STALE" });
-    await expect(service.amendResult(lab, draft.result.id, { reason: "Ainda draft", narrative: "Nova versão", content: {}, idempotencyKey: "draft-amend" })).rejects.toMatchObject({ code: "INVALID_STATE_TRANSITION" });
-    await expect(service.voidResult(lab, draft.result.id, { reason: "Ainda draft", idempotencyKey: "draft-void" })).rejects.toMatchObject({ code: "INVALID_STATE_TRANSITION" });
   });
 });

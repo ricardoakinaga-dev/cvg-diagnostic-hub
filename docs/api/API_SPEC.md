@@ -24,11 +24,11 @@ Collections add `meta.nextCursor`, `meta.limit` and stable ordering. Errors foll
 - Internal resource IDs: opaque UUIDv7 strings.
 - Human request identifier: `requestCode`.
 - Mutating clinical commands: `Idempotency-Key` and `If-Match`/`expectedVersion` where specified.
-- Auth: secure server session cookie; future OIDC boundary does not expose bearer tokens to local storage.
+- Auth: secure server session cookie; future OIDC boundary does not expose bearer tokens to local storage. `POST /session/reauth` records a short-lived password reauthentication on the session for sensitive access-management commands.
 
 ### Pagination/filtering
 
-List endpoints accept `limit` (default 25, max 100), opaque `cursor`, `sort`, and resource-specific filters. No endpoint returns unbounded clinical data. Filters use stable enum codes.
+List endpoints accept `limit` (default 25, max 100), opaque keyset `cursor`, `sort`, and resource-specific filters. Search cursors encode the last rank/updatedAt/id tuple and timeline cursors encode occurredAt/id; clients must treat them as opaque. No endpoint returns unbounded clinical data. Filters use stable enum codes.
 
 ### Idempotency and concurrency matrix
 
@@ -45,7 +45,8 @@ List endpoints accept `limit` (default 25, max 100), opaque `cursor`, `sort`, an
 | `POST /results/{id}/release`, `/amend`, `/void`, `/view`, `/review` | required | result/item version |
 | `POST /diagnostic-items/{id}/complete` | required | item version |
 | `POST /result-versions/{id}/attachments/upload-session`, `POST /attachments/{id}/finalize` | required | attachment/version state |
-| `POST /notifications/{id}/acknowledge` | required for critical acknowledgement | notification/result version |
+| `POST /notifications/{id}/acknowledge` | required | notification version, non-empty reason and explicit confirmation |
+| `POST /users/{id}/roles` | required | recent password reauthentication, target `expectedVersion`, non-empty reason and explicit confirmation |
 
 ## 2. Resources
 
@@ -59,6 +60,7 @@ List endpoints accept `limit` (default 25, max 100), opaque `cursor`, `sort`, an
 | Reports/attachments | `GET /reports/{id}`, upload session/finalize/download | result + file scope |
 | Notifications | `GET /notifications`, `POST /notifications/{id}/acknowledge` | recipient |
 | Catalog | `GET /diagnostic-services`, `GET /reason-codes`, admin commands | config permission |
+| Users and roles | `GET /users`, `POST /users/{id}/roles` | `user_role.manage` (ADMIN-only in the local boundary); credentials are never returned; role changes require reauthentication and audit |
 | Search | `GET /search` | scoped search |
 | Audit/timeline | `GET /audit-events`, `GET /timeline` | scoped/manager |
 | Health | `GET /livez`, `GET /readyz` | liveness/readiness policy |
@@ -71,7 +73,7 @@ Every endpoint below performs a server-side check for each listed canonical perm
 | Method and path | Required permission(s) | Additional condition/scope |
 | --- | --- | --- |
 | `GET /patients` | `patient.view` | only authorized patient search fields |
-| `GET /patients/{id}` | `patient.view` | CARE/assigned or explicit manager scope |
+| `GET /patients/{id}` | `patient.view` | CARE/assigned or manager request/item department scope; no local ADMIN patient scope |
 | `GET /patients/{id}/diagnostics` | `patient.view`, `diagnostic.timeline.view` | CARE/assigned patient scope; paginated |
 | `GET /patients/{id}/encounters` | `encounter.view` | patient scope; returns only that patient's encounters |
 | `GET /encounters/{id}` | `encounter.view` | patient/encounter scope |
@@ -106,27 +108,28 @@ Every endpoint below performs a server-side check for each listed canonical perm
 | `POST /attachments/{id}/finalize` | `attachment.finalize` | owning result/service and scan/checksum policy |
 | `GET /attachments/{id}/download` | `attachment.download`, `attachment.view` | short-lived authorized download only |
 | `GET /notifications` | `notification.view` | recipient scope; no cross-user listing |
-| `POST /notifications/{id}/acknowledge` | `notification.view`, `notification.acknowledge` | recipient or explicit manager policy |
+| `POST /notifications/{id}/acknowledge` | `notification.view`, `notification.acknowledge` | recipient or explicit manager policy; `expectedVersion`, non-empty `reason` and `confirm: true` |
 | `GET /queues/{departmentCode}/items` | `queue.view` | assigned department; department code is not authority |
 | `GET /timeline` | `timeline.view` | request/item scope and cursor filters |
 | `GET /search` | `search.execute` | every returned record is independently scope-filtered |
 | `GET /diagnostic-services` | `service.catalog.view` | authenticated operational scope |
 | `GET /diagnostic-services?includeInactive=true` | `service.catalog.manage` | admin/delegated manager scope; inactive values remain visible only for configuration |
-| `POST /diagnostic-services/{id}` | `service.catalog.manage` | admin/delegated manager policy; no destructive delete |
+| `POST /diagnostic-services` | `service.catalog.manage` | admin/delegated manager policy; creates a versioned catalog entry |
 | `PATCH /diagnostic-services/{id}` | `service.catalog.manage` | admin/delegated manager policy; versioned/deactivate only |
 | `POST /sla-policies/{id}` | `sla_policy.manage` | admin/delegated manager policy |
 | `PATCH /sla-policies/{id}` | `sla_policy.manage` | admin/delegated manager policy and version guard |
 | `POST /critical-result-policies/{id}` | `critical_result_policy.manage` | admin/delegated manager policy |
 | `PATCH /critical-result-policies/{id}` | `critical_result_policy.manage` | admin/delegated manager policy and version guard |
-| `POST /reason-codes/{id}` | `reason_code.manage` | admin/delegated manager policy |
+| `POST /reason-codes` | `reason_code.manage` | admin/delegated manager policy; creates an auditable code |
 | `PATCH /reason-codes/{id}` | `reason_code.manage` | admin/delegated manager policy and version guard |
 | `GET /reason-codes` | `reason_code.manage` | configuration actors only; inactive values retained for audit |
-| `POST /users/{id}/roles` | `user_role.manage` | admin/delegated manager policy; audited |
-| role revocation command for `/users/{id}/roles` | `user_role.manage` | admin/delegated manager policy; audited |
+| `GET /users` | `user_role.manage` | ADMIN-only in the local boundary; returns safe user fields only, with no password hash or credential material |
+| `POST /users/{id}/roles` | `user_role.manage` | ADMIN-only in the local boundary; recent password reauthentication, target `expectedVersion`, reason, confirmation and audit |
 | `GET /audit-events` | `audit.view` | manager/admin or scoped audit policy |
 | `GET /livez` | `health.liveness` | platform/internal exposure policy |
 | `GET /readyz` | `health.readiness` | platform/internal exposure policy |
 | `GET /realtime/events` | `realtime.connect` | authenticated session and event scope |
+| `POST /session/reauth` | authenticated session | current password; refreshes a short-lived step-up timestamp without returning credentials |
 
 This table is exhaustive for the planned routes in this document. Any new route must add a canonical permission, scope rule and operation-traceability row in the same change.
 
@@ -204,21 +207,22 @@ Result release cannot reference attachment with `PENDING`, `FAILED` or `QUARANTI
 
 ## 8. Query endpoints
 
-- `GET /diagnostic-requests?status=&departmentId=&priority=&serviceId=&overdue=&from=&to=&cursor=`
+- `GET /diagnostic-requests?status=&departmentCode=&priority=&serviceId=&overdue=&from=&to=&cursor=&limit=` filters visible items before applying the cursor; `from`/`to` bound request creation time and `overdue` is derived from server time and terminal state.
 - `GET /queues/{departmentCode}/items?...` returns action-oriented cards/table rows.
 - `GET /patients/{id}/diagnostics?cursor=` returns timeline/summary scoped to patient.
-- `GET /timeline?requestId=&itemId=&cursor=` returns event-derived entries.
-- `GET /search?...` follows [`../spec/SEARCH.md`](../spec/SEARCH.md).
+- `GET /timeline?requestId=&itemId=&cursor=&limit=` returns event-derived entries with stable occurredAt/id keyset pagination and rejects a request/item pair from different contexts.
+- `GET /dashboard` returns the current authorized state with five indicator groups (`overdue`, `recollections`, `newResults`, `critical`, `totalActive`). Each group includes `count`, numeric `denominator`, `denominatorDefinition`, `definition` and `nextAction`; the response also includes `window.kind=CURRENT_STATE`, `window.asOf`, `window.timezone` and `updatedAt`. Manager denominators include only items in the assigned department.
+- `GET /search?q=&types=&status=&departmentCode=&from=&to=&cursor=&limit=` follows [`../spec/SEARCH.md`](../spec/SEARCH.md), applies authorization before ranking/counting and uses a stable rank/updatedAt/id keyset cursor.
 
 ## 9. Configuration endpoints
 
 Administrative commands are explicit, audited and protected:
 
-- `POST/PATCH /diagnostic-services/{id}`;
+- `POST /diagnostic-services` and `PATCH /diagnostic-services/{id}`;
 - `POST/PATCH /sla-policies/{id}`;
 - `POST/PATCH /critical-result-policies/{id}`;
-- `POST/PATCH /reason-codes/{id}`;
-- `POST /users/{id}/roles` and role revocation.
+- `POST /reason-codes` and `PATCH /reason-codes/{id}`;
+- `GET /users` and `POST /users/{id}/roles`.
 
 No endpoint allows deleting a referenced service, policy or reason; deactivate/version instead.
 

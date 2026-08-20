@@ -4,27 +4,30 @@ const concurrency = positiveInteger(process.env.PERF_CONCURRENCY, 10);
 const warmupRequests = positiveInteger(process.env.PERF_WARMUP, 10);
 const targetP95Ms = positiveNumber(process.env.PERF_TARGET_P95_MS, 500);
 const enforce = process.env.PERF_ENFORCE !== "false";
+const workloads = [
+  { endpoint: "/api/v1/diagnostic-services", path: "/api/v1/diagnostic-services" },
+  { endpoint: "/api/v1/diagnostic-requests?limit=25", path: "/api/v1/diagnostic-requests?limit=25" },
+  { endpoint: "/api/v1/search?q=HEMOGRAM&limit=25", path: "/api/v1/search?q=HEMOGRAM&limit=25" },
+  { endpoint: "/api/v1/dashboard", path: "/api/v1/dashboard" }
+] as const;
 
 async function main(): Promise<void> {
   const cookie = await login();
-  await runBatch(warmupRequests, concurrency, cookie);
-  const samples = await runBatch(totalRequests, concurrency, cookie);
-  const durations = samples.map((sample) => sample.durationMs).sort((left, right) => left - right);
-  const errors = samples.filter((sample) => sample.status < 200 || sample.status >= 300);
+  await Promise.all(workloads.map((workload) => runBatch(workload.path, warmupRequests, concurrency, cookie)));
+  const reports = await Promise.all(workloads.map(async (workload) => summarize(workload.endpoint, await runBatch(workload.path, totalRequests, concurrency, cookie))));
+  const errors = reports.reduce((total, report) => total + report.errors, 0);
+  const requests = reports.reduce((total, report) => total + report.requests, 0);
   const report = {
-    endpoint: "/api/v1/diagnostic-services",
-    requests: samples.length,
+    workloads: reports,
+    requests,
     concurrency,
-    errors: errors.length,
-    errorRate: Number((errors.length / Math.max(1, samples.length)).toFixed(4)),
-    p50Ms: percentile(durations, 0.5),
-    p95Ms: percentile(durations, 0.95),
-    p99Ms: percentile(durations, 0.99),
-    maxMs: durations.at(-1) ?? 0,
+    errors,
+    errorRate: Number((errors / Math.max(1, requests)).toFixed(4)),
+    maxP95Ms: Math.max(...reports.map((entry) => entry.p95Ms)),
     targetP95Ms
   };
   console.log(JSON.stringify(report, null, 2));
-  if (enforce && (report.errors > 0 || report.p95Ms > targetP95Ms)) throw new Error("Performance smoke não atingiu o alvo configurado.");
+  if (enforce && (report.errors > 0 || report.maxP95Ms > targetP95Ms)) throw new Error("Performance smoke não atingiu o alvo configurado.");
 }
 
 async function login(): Promise<string> {
@@ -40,17 +43,32 @@ async function login(): Promise<string> {
   return cookies;
 }
 
-async function runBatch(count: number, workers: number, cookie: string): Promise<Array<{ status: number; durationMs: number }>> {
+async function runBatch(path: string, count: number, workers: number, cookie: string): Promise<Array<{ status: number; durationMs: number }>> {
   const results: Array<{ status: number; durationMs: number }> = [];
   await Promise.all(Array.from({ length: Math.min(workers, count) }, async (_, worker) => {
     for (let index = worker; index < count; index += workers) {
       const started = performance.now();
-      const response = await fetch(`${baseUrl}/api/v1/diagnostic-services`, { headers: { cookie } });
+      const response = await fetch(`${baseUrl}${path}`, { headers: { cookie } });
       results.push({ status: response.status, durationMs: round(performance.now() - started) });
       await response.arrayBuffer();
     }
   }));
   return results;
+}
+
+function summarize(endpoint: string, samples: Array<{ status: number; durationMs: number }>) {
+  const durations = samples.map((sample) => sample.durationMs).sort((left, right) => left - right);
+  const errors = samples.filter((sample) => sample.status < 200 || sample.status >= 300);
+  return {
+    endpoint,
+    requests: samples.length,
+    errors: errors.length,
+    errorRate: Number((errors.length / Math.max(1, samples.length)).toFixed(4)),
+    p50Ms: percentile(durations, 0.5),
+    p95Ms: percentile(durations, 0.95),
+    p99Ms: percentile(durations, 0.99),
+    maxMs: durations.at(-1) ?? 0
+  };
 }
 
 function percentile(values: number[], ratio: number): number {

@@ -4,14 +4,14 @@ import { z } from "zod";
 import { createApplicationService } from "../../../../server/application/service";
 import { createSuccessResponse, toApiErrorResponse } from "../../../../server/http/envelope";
 import { getRuntimeFileStore, getRuntimeReadiness, getRuntimeStoreAsync } from "../../../../server/store/runtime";
-import { assertCsrf, authenticateRequest, clearSessionCookies, getCookieValue, loginUser, revokeSession, sessionCookies } from "../../../../server/security/session";
-import type { CommandMeta } from "../../../../server/application/service";
+import { assertCsrf, authenticateRequest, clearSessionCookies, getCookieValue, loginUser, reauthenticateUser, revokeSession, sessionCookies } from "../../../../server/security/session";
+import type { CommandMeta, SearchResultType } from "../../../../server/application/service";
 import { ApiError } from "../../../../server/http/envelope";
 import { canAccessResource } from "../../../../server/security/authorization";
 import type { User } from "../../../../server/domain/models";
 import { assertRateLimit } from "../../../../server/security/rate-limit";
 import { incrementGauge, recordHttpRequest, recordReadinessFailure, refreshOperationalMetrics, renderPrometheus, routeMetricLabel } from "../../../../server/observability/metrics";
-import { ITEM_STATES } from "@cvg/contracts";
+import { ITEM_STATES, PRIORITIES, ROLES } from "@cvg/contracts";
 import {
   acknowledgeNotificationSchema,
   amendResultSchema,
@@ -57,6 +57,8 @@ const serviceCreateSchema = z.object({
 const servicePatchSchema = z.object({ name: z.string().min(1).max(120).optional(), active: z.boolean().optional(), allowsAttachment: z.boolean().optional(), slaHours: z.object({ ROUTINE: z.number().positive().max(720), URGENT: z.number().positive().max(720), EMERGENCY: z.number().positive().max(720) }).strict().optional(), expectedVersion: z.number().int().positive().optional() }).strict();
 const reasonCreateSchema = z.object({ type: z.enum(["RECOLLECTION", "CANCEL", "REJECT", "AMEND"]), code: z.string().min(2).max(60), label: z.string().min(1).max(160) }).strict();
 const reasonPatchSchema = z.object({ label: z.string().min(1).max(160).optional(), active: z.boolean().optional(), expectedVersion: z.number().int().positive().optional() }).strict();
+const reauthenticationSchema = z.object({ password: z.string().min(1).max(200) }).strict();
+const userRoleSchema = z.object({ role: z.enum(ROLES), departmentCode: z.string().min(1).max(60), active: z.boolean().optional(), expectedVersion: z.number().int().positive(), reason: z.string().min(1).max(500), confirm: z.literal(true) }).strict();
 
 function correlationFrom(request: Request): string {
   const supplied = request.headers.get("x-correlation-id")?.trim();
@@ -183,6 +185,20 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       for (const cookie of clearSessionCookies()) response.headers.append("set-cookie", cookie);
       return response;
     }
+    if (path[0] === "session" && path[1] === "reauth" && method === "POST") {
+      const parsed = reauthenticationSchema.safeParse(await jsonBody(request));
+      if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Informe sua senha para confirmar a identidade.", 400);
+      const reauthenticated = await reauthenticateUser(store, request, parsed.data.password);
+      return responseFor({ user: publicUser(reauthenticated), reauthenticatedAt: reauthenticated.reauthenticatedAt }, correlationId, id);
+    }
+
+    if (path[0] === "users" && path.length === 1 && method === "GET") return responseFor(await service.listManagedUsers(actor), correlationId, id);
+    if (path[0] === "users" && path.length === 3 && path[2] === "roles" && method === "POST") {
+      const body = await objectBody(request);
+      const parsed = userRoleSchema.safeParse(body);
+      if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados de role são inválidos.", 400);
+      return responseFor(await service.updateUserRole(actor, path[1], { ...parsed.data, ...commandMeta(request, body) }), correlationId, id);
+    }
 
     if (path[0] === "diagnostic-services" && method === "GET" && path.length === 1) {
       const includeInactive = new URL(request.url).searchParams.get("includeInactive") === "true";
@@ -229,7 +245,17 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
 
     if (path[0] === "diagnostic-requests" && path.length === 1 && method === "GET") {
       const search = new URL(request.url).searchParams;
-      const data = await service.listRequests(actor, { status: parseItemState(search.get("status")), departmentCode: search.get("departmentCode") ?? undefined, cursor: parseCursor(search.get("cursor")), limit: parseLimit(search.get("limit")) });
+      const data = await service.listRequests(actor, {
+        status: parseItemState(search.get("status")),
+        departmentCode: search.get("departmentCode") ?? search.get("departmentId") ?? undefined,
+        priority: parsePriority(search.get("priority")),
+        serviceId: search.get("serviceId") ?? undefined,
+        overdue: parseBooleanFilter(search.get("overdue"), "overdue"),
+        from: search.get("from") ?? undefined,
+        to: search.get("to") ?? undefined,
+        cursor: parseCursor(search.get("cursor")),
+        limit: parseLimit(search.get("limit"))
+      });
       return responseFor(data.items, correlationId, id, 200, { nextCursor: data.nextCursor, limit: data.limit, total: data.total });
     }
     if (path[0] === "diagnostic-requests" && path.length === 1 && method === "POST") {
@@ -377,8 +403,8 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
     if (path[0] === "notifications" && method === "GET") return responseFor(await service.listNotifications(actor, (new URL(request.url).searchParams.get("filter") as "ALL" | "UNREAD" | "ACTIONABLE" | "CRITICAL") ?? "ALL"), correlationId, id);
     if (path[0] === "notifications" && path[2] === "acknowledge" && method === "POST") {
       const body = await objectBody(request);
-      parseCommandBody(body, acknowledgeNotificationSchema, "Os dados de confirmação são inválidos.");
-      return responseFor(await service.acknowledgeNotification(actor, path[1], commandMeta(request, body)), correlationId, id);
+      const parsed = parseCommandBody(body, acknowledgeNotificationSchema, "Os dados de confirmação são inválidos.");
+      return responseFor(await service.acknowledgeNotification(actor, path[1], { ...parsed, ...commandMeta(request, body) }), correlationId, id);
     }
     if (path[0] === "queues" && path[2] === "items" && method === "GET") {
       const search = new URL(request.url).searchParams;
@@ -388,11 +414,21 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
     }
     if (path[0] === "search" && method === "GET") {
       const search = new URL(request.url).searchParams;
-      return responseFor(await service.search(actor, search.get("q") ?? "", parseLimit(search.get("limit"))), correlationId, id);
+      const data = await service.search(actor, search.get("q") ?? "", {
+        types: parseSearchTypes(search.get("types")),
+        status: parseItemState(search.get("status")),
+        departmentCode: search.get("department") ?? search.get("departmentCode") ?? undefined,
+        from: search.get("from") ?? undefined,
+        to: search.get("to") ?? undefined,
+        cursor: parseCursor(search.get("cursor")),
+        limit: parseLimit(search.get("limit"))
+      });
+      return responseFor(data.items, correlationId, id, 200, { nextCursor: data.nextCursor, limit: data.limit, total: data.total });
     }
     if (path[0] === "timeline" && method === "GET") {
       const search = new URL(request.url).searchParams;
-      return responseFor(await service.timeline(actor, search.get("requestId") ?? undefined, search.get("itemId") ?? undefined), correlationId, id);
+      const data = await service.timeline(actor, search.get("requestId") ?? undefined, search.get("itemId") ?? undefined, { cursor: parseCursor(search.get("cursor")), limit: parseLimit(search.get("limit")) });
+      return responseFor(data.items, correlationId, id, 200, { nextCursor: data.nextCursor, limit: data.limit, total: data.total });
     }
     if (path[0] === "dashboard" && method === "GET") return responseFor(await service.dashboard(actor), correlationId, id);
     if (path[0] === "realtime" && path[1] === "events" && method === "GET") {
@@ -430,6 +466,27 @@ function parseItemState(value: string | null) {
   const parsed = z.enum(ITEM_STATES).safeParse(value);
   if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "O status informado é inválido.", 400);
   return parsed.data;
+}
+
+function parsePriority(value: string | null) {
+  if (value === null) return undefined;
+  const parsed = z.enum(PRIORITIES).safeParse(value);
+  if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "A prioridade informada é inválida.", 400);
+  return parsed.data;
+}
+
+function parseBooleanFilter(value: string | null, field: string): boolean | undefined {
+  if (value === null) return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new ApiError("VALIDATION_ERROR", `O filtro ${field} é inválido.`, 400);
+}
+
+function parseSearchTypes(value: string | null): SearchResultType[] | undefined {
+  if (value === null) return undefined;
+  const types = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (!types.length || types.some((type) => type !== "REQUEST" && type !== "ITEM")) throw new ApiError("VALIDATION_ERROR", "O tipo de busca é inválido.", 400);
+  return [...new Set(types)] as SearchResultType[];
 }
 
 function parseCursor(value: string | null): string | undefined {
@@ -477,6 +534,10 @@ function realtimeResponse(store: Awaited<ReturnType<typeof getRuntimeStoreAsync>
       const send = () => {
         if (closed) return;
         const current = store.getState();
+        if (!authorizationSnapshotIsCurrent(current, actor)) {
+          closeStream();
+          return;
+        }
         const messages = current.outbox.slice(-20);
         const cursorIndex = cursor ? messages.findIndex((message) => message.id === cursor) : -1;
         const expired = Boolean(cursor) && cursorIndex < 0;
@@ -489,7 +550,7 @@ function realtimeResponse(store: Awaited<ReturnType<typeof getRuntimeStoreAsync>
         controller.enqueue(encoder.encode(nextPayload));
       };
       controller.enqueue(encoder.encode(`retry: 5000\n\n${payload || ": heartbeat\n\n"}`));
-      timer = setInterval(send, 5_000);
+      timer = setInterval(send, positiveInteger(process.env.REALTIME_STREAM_INTERVAL_MS, 5_000));
       if (maxStreamMs > 0) expirationTimer = setTimeout(closeStream, maxStreamMs);
       request.signal.addEventListener("abort", () => {
         closeStream();
@@ -509,8 +570,13 @@ function realtimeResponse(store: Awaited<ReturnType<typeof getRuntimeStoreAsync>
   return new Response(stream, { headers });
 }
 
+function authorizationSnapshotIsCurrent(state: ReturnType<Awaited<ReturnType<typeof getRuntimeStoreAsync>>["getState"]>, actor: User): boolean {
+  const current = state.users.find((user) => user.id === actor.id);
+  const session = actor.sessionId ? state.sessions.find((entry) => entry.id === actor.sessionId) : undefined;
+  return Boolean(current?.active && current.version === actor.version && current.role === actor.role && current.departmentCode === actor.departmentCode && session && !session.revokedAt && new Date(session.expiresAt).getTime() > Date.now());
+}
+
 function eventVisible(state: ReturnType<Awaited<ReturnType<typeof getRuntimeStoreAsync>>["getState"]>, actor: User, entityType: string, entityId: string, payload: Record<string, unknown>): boolean {
-  if (actor.role === "ADMIN") return true;
   let patientId: string | undefined;
   let departmentCode: string | undefined;
   if (entityType === "DiagnosticRequest") {

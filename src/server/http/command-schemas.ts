@@ -74,4 +74,8 @@ export const attachmentUploadSchema = z.object({
 }).strict();
 
 export const attachmentFinalizeSchema = z.object({ expectedVersion }).strict();
-export const acknowledgeNotificationSchema = emptyCommandSchema;
+export const acknowledgeNotificationSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  reason: boundedText(500),
+  confirm: z.literal(true)
+}).strict();

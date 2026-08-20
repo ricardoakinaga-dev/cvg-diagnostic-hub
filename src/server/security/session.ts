@@ -73,7 +73,28 @@ export async function authenticateRequest(store: StateStore, request: Request): 
   }
   const user = state.users.find((entry) => entry.id === session.userId && entry.active);
   if (!user) throw new ApiError("SESSION_EXPIRED", "Sessão expirada. Entre novamente.", 401);
-  return user;
+  return { ...user, sessionId: session.id, reauthenticatedAt: session.reauthenticatedAt };
+}
+
+export async function reauthenticateUser(store: StateStore, request: Request, password: string): Promise<User> {
+  const token = parseCookies(request)[SESSION_COOKIE];
+  if (!token) throw new ApiError("UNAUTHENTICATED", "Sessão necessária.", 401);
+  return store.transaction((state) => {
+    const session = state.sessions.find((entry) => entry.tokenHash === hash(token));
+    if (!session || session.revokedAt || new Date(session.expiresAt).getTime() <= Date.now()) {
+      throw new ApiError("SESSION_EXPIRED", "Sessão expirada. Entre novamente.", 401);
+    }
+    const user = state.users.find((entry) => entry.id === session.userId && entry.active);
+    if (!user || !verifyPassword(password, user.passwordHash)) {
+      throw new ApiError("UNAUTHENTICATED", "Credenciais inválidas.", 401);
+    }
+    const reauthenticatedAt = new Date().toISOString();
+    const updatedSession = { ...session, reauthenticatedAt, version: session.version + 1 };
+    return {
+      state: { ...state, sessions: state.sessions.map((entry) => entry.id === session.id ? updatedSession : entry) },
+      result: { ...user, sessionId: session.id, reauthenticatedAt }
+    };
+  });
 }
 
 export async function revokeSession(store: StateStore, token: string): Promise<void> {

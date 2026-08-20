@@ -44,6 +44,7 @@ describe("strict command schemas", () => {
     expect(attachmentFinalizeSchema.safeParse({ unexpected: true }).success).toBe(false);
     expect(releaseResultSchema.safeParse({ critical: false }).success).toBe(true);
     expect(voidResultSchema.safeParse({ reason: "Correção", expectedVersion: 1 }).success).toBe(true);
-    expect(acknowledgeNotificationSchema.safeParse({}).success).toBe(true);
+    expect(acknowledgeNotificationSchema.safeParse({}).success).toBe(false);
+    expect(acknowledgeNotificationSchema.safeParse({ expectedVersion: 1, reason: "Confirmei o contexto", confirm: true }).success).toBe(true);
   });
 });

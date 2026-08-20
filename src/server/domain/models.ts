@@ -11,6 +11,9 @@ export interface User extends Actor {
   timezone: string;
   createdAt: Timestamp;
   version: number;
+  /** Ephemeral authentication context; never persisted or returned as a user field. */
+  sessionId?: string;
+  reauthenticatedAt?: Timestamp;
 }
 
 export interface Session {
@@ -21,6 +24,7 @@ export interface Session {
   createdAt: Timestamp;
   expiresAt: Timestamp;
   revokedAt?: Timestamp;
+  reauthenticatedAt?: Timestamp;
   version: number;
 }
 
@@ -208,6 +212,7 @@ export interface Notification {
   acknowledgedAt?: Timestamp;
   acknowledgedBy?: string;
   attempts: number;
+  version: number;
 }
 
 export interface AuditEvent {
