@@ -99,13 +99,13 @@ describe("AppShell", () => {
     expect(screen.queryByRole("link", { name: "Administração" })).not.toBeInTheDocument();
   });
 
-  it.each(["ADMIN", "MANAGER"] as const)("exposes management navigation to %s", async (role) => {
+  it("keeps clinical navigation available to a manager", async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       user: {
         id: "user-management",
         email: "management@cvg.local",
         displayName: "Gestão",
-        role,
+        role: "MANAGER",
         departmentCode: "LABORATORY",
         timezone: "America/Sao_Paulo",
       },
@@ -116,5 +116,29 @@ describe("AppShell", () => {
     await screen.findByRole("navigation", { name: "Navegação principal" });
     expect(screen.getByRole("link", { name: "Indicadores" })).toHaveAttribute("href", "/indicators");
     expect(screen.getByRole("link", { name: "Administração" })).toHaveAttribute("href", "/admin");
+  });
+
+  it("limits a technical administrator to the technical administration area", async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      user: {
+        id: "user-admin",
+        email: "admin@cvg.local",
+        displayName: "Administração Técnica",
+        role: "ADMIN",
+        departmentCode: "IT",
+        timezone: "America/Sao_Paulo",
+      },
+    });
+
+    render(<AppShell><div>Conteúdo da página</div></AppShell>);
+
+    await screen.findByRole("navigation", { name: "Navegação principal" });
+    expect(screen.getByRole("link", { name: "Visão geral" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Administração" })).toHaveAttribute("href", "/admin");
+    expect(screen.queryByRole("link", { name: "Central de exames" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Meus pacientes" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Indicadores" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Notificações" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Abrir notificações" })).not.toBeInTheDocument();
   });
 });

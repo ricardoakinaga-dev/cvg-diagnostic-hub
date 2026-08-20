@@ -360,6 +360,13 @@ em { color: var(--teal); font-family: var(--font-display); font-weight: 400; }
 .admin-policy-banner { display: grid; gap: 5px; margin-bottom: 14px; padding: 15px 18px; border: 1px solid #efd7a7; border-radius: 10px; color: #76591f; background: #fff9ec; font-size: 11px; }
 .admin-policy-banner strong { color: #76591f; font-size: 12px; }
 .admin-policy-banner p { max-width: 920px; }
+.admin-landing-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.admin-landing-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; min-height: 116px; padding: 20px 22px; }
+.admin-landing-card > span:nth-child(2) { display: grid; gap: 4px; }
+.admin-landing-card strong { color: var(--ink); font-size: 13px; }
+.admin-landing-card small { color: var(--ink-soft); font-size: 11px; }
+.admin-landing-card:hover { border-color: #a3d4cc; }
+.admin-landing-status { color: var(--teal-dark); font-size: 10px; font-weight: 800; white-space: nowrap; }
 .admin-row { display: grid; gap: 8px; padding: 17px 22px; border-top: 1px solid var(--line); }
 .admin-row-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .admin-row-heading strong { color: var(--ink); font-size: 12px; letter-spacing: .03em; }
@@ -426,6 +433,7 @@ em { color: var(--teal); font-family: var(--font-display); font-weight: 400; }
   .content-wrap { width: calc(100% - 40px); padding-top: 34px; }
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .dashboard-columns, .detail-grid, .indicator-columns, .admin-columns { grid-template-columns: 1fr; }
+  .admin-landing-grid { grid-template-columns: 1fr; }
   .result-grid { grid-template-columns: 1fr; }
   .patient-detail-grid { grid-template-columns: 1fr; }
   .login-screen { grid-template-columns: 1fr; }

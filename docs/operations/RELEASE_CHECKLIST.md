@@ -6,7 +6,7 @@ Use for every pilot/production release; checkboxes require evidence link or comm
 
 ## Current local evidence (20/08/2026)
 
-`npm run test:coverage` (109/109; 95.35% statements, 81.05% branches), typecheck/lint/build, isolated Playwright desktop/tablet/mobile via the LAN URL (24/24), including request-detail layout, `npm run test:accessibility` (6/6), PostgreSQL migration/seed/smoke, restore smoke (`1|26|13`), OpenAPI validation (47 paths), secret scan, production `next start` perf smoke (400 requests, 0 errors; maximum p95 434.69 ms against 500 ms) and `npm audit --audit-level=high` have passed for the synthetic local MVP. The checklist remains open because production evidence, policy approval and operational ownership are not yet present.
+`npm run test:coverage` (110/110; 95.35% statements, 81.05% branches), typecheck/lint/build, isolated Playwright desktop/tablet/mobile via the LAN URL (27/27), including request-detail layout and the technical ADMIN landing, `npm run test:accessibility` (6/6), PostgreSQL migration/seed/smoke, restore smoke (`1|26|13`), OpenAPI validation (47 paths), secret scan, production `next start` perf smoke (400 requests, 0 errors; maximum p95 434.69 ms against 500 ms) and `npm audit --audit-level=high` have passed for the synthetic local MVP. The checklist remains open because production evidence, policy approval and operational ownership are not yet present.
 
 ## Change and migration
 

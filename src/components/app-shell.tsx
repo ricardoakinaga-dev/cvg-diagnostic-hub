@@ -61,6 +61,9 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
   if (loading) return <div className="screen-center"><div className="loading-mark" aria-label="Carregando" /></div>;
   if (!user) return null;
   const canAccessManagement = user.role === "ADMIN" || user.role === "MANAGER";
+  const isTechnicalAdmin = user.role === "ADMIN";
+  const canAccessClinicalOperations = !isTechnicalAdmin;
+  const canAccessIndicators = user.role === "MANAGER";
 
   return (
     <div className="app-frame">
@@ -71,11 +74,11 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
         </Link>
         <nav aria-label="Navegação principal" className="main-nav">
           <NavLink href="/" active={pathname === "/"} icon="⌂">Visão geral</NavLink>
-          <NavLink href="/queues" active={pathname.startsWith("/queues")} icon="▤">Central de exames</NavLink>
-          <NavLink href="/patients" active={pathname.startsWith("/patients")} icon="♧">Meus pacientes</NavLink>
-          {canAccessManagement && <NavLink href="/indicators" active={pathname.startsWith("/indicators")} icon="◒">Indicadores</NavLink>}
+          {canAccessClinicalOperations && <NavLink href="/queues" active={pathname.startsWith("/queues")} icon="▤">Central de exames</NavLink>}
+          {canAccessClinicalOperations && <NavLink href="/patients" active={pathname.startsWith("/patients")} icon="♧">Meus pacientes</NavLink>}
+          {canAccessIndicators && <NavLink href="/indicators" active={pathname.startsWith("/indicators")} icon="◒">Indicadores</NavLink>}
           {canAccessManagement && <NavLink href="/admin" active={pathname.startsWith("/admin")} icon="⚙">Administração</NavLink>}
-          <NavLink href="/notifications" active={pathname.startsWith("/notifications")} icon="◌">Notificações</NavLink>
+          {canAccessClinicalOperations && <NavLink href="/notifications" active={pathname.startsWith("/notifications")} icon="◌">Notificações</NavLink>}
         </nav>
         <div className="sidebar-footer">
           <div className={`live-indicator live-${live}`}><span />{live === "connected" ? "Atualização ao vivo" : live === "degraded" ? "Atualização interrompida" : "Conectando"}</div>
@@ -83,7 +86,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
         </div>
       </aside>
       <main className="main-content">
-        <header className="topbar"><div className="breadcrumb">CVG <span>/</span> Operação</div><div className="topbar-actions"><Link href="/notifications" className="notification-trigger" aria-label="Abrir notificações">◌</Link><span className="topbar-date">{new Intl.DateTimeFormat("pt-BR", { weekday: "short", day: "2-digit", month: "short" }).format(new Date())}</span></div></header>
+        <header className="topbar"><div className="breadcrumb">CVG <span>/</span> Operação</div><div className="topbar-actions">{canAccessClinicalOperations && <Link href="/notifications" className="notification-trigger" aria-label="Abrir notificações">◌</Link>}<span className="topbar-date">{new Intl.DateTimeFormat("pt-BR", { weekday: "short", day: "2-digit", month: "short" }).format(new Date())}</span></div></header>
         {live !== "connected" && <RealtimeStatusBanner status={live} onReconcile={reconcile} />}
         <div className="content-wrap">{children}</div>
       </main>

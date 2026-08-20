@@ -124,6 +124,20 @@ describe("Dashboard resilience", () => {
     expect(statsAttempts).toBe(2);
   });
 
+  it("shows the technical administration landing without requesting clinical resources for ADMIN", async () => {
+    const apiFetchMock = vi.spyOn(apiClient, "apiFetch").mockImplementation((path) => {
+      if (path === "/session/me") return Promise.resolve({ user: { displayName: "Administração Técnica", role: "ADMIN" } }) as never;
+      return Promise.reject(new Error(`unexpected request: ${path}`)) as never;
+    });
+
+    render(<Dashboard />);
+
+    expect(await screen.findByRole("heading", { name: /Administração técnica/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Abrir administração/ })).toHaveAttribute("href", "/admin");
+    expect(screen.queryByText("Você não tem acesso a este recurso.")).not.toBeInTheDocument();
+    expect(apiFetchMock.mock.calls.map(([path]) => path)).toEqual(["/session/me"]);
+  });
+
   it("keeps stale data and its last update timestamp visible after a refresh failure", async () => {
     let statsAttempts = 0;
     vi.spyOn(apiClient, "apiFetch").mockImplementation((path) => {

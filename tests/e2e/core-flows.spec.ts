@@ -1,12 +1,16 @@
 import { expect, test } from "@playwright/test";
 
-async function signIn(page: import("@playwright/test").Page): Promise<void> {
+async function signInAs(page: import("@playwright/test").Page, email: string, expectedHeading: RegExp): Promise<void> {
   await page.goto("/login");
-  await page.getByLabel("E-mail profissional").fill("vet@cvg.local");
+  await page.getByLabel("E-mail profissional").fill(email);
   await page.getByLabel("Senha").fill("local-demo-password");
   await page.getByRole("button", { name: "Entrar no Hub" }).click({ force: true });
   await expect(page).toHaveURL(/\/$/, { timeout: 15000 });
-  await expect(page.getByRole("heading", { name: /Bom dia/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: expectedHeading })).toBeVisible();
+}
+
+async function signIn(page: import("@playwright/test").Page): Promise<void> {
+  await signInAs(page, "vet@cvg.local", /Bom dia/);
 }
 
 test.describe("operational hub journeys", () => {
@@ -15,6 +19,14 @@ test.describe("operational hub journeys", () => {
     await expect(page.getByRole("region", { name: "Indicadores de atenção" })).toBeVisible();
     await expect(page.getByText("Solicitações em andamento")).toBeVisible();
     await expect(page.getByRole("link", { name: /Central de exames/ })).toBeVisible();
+  });
+
+  test("renders a useful technical home for an administrator", async ({ page }) => {
+    await signInAs(page, "admin@cvg.local", /Administração técnica/);
+    await expect(page.getByText("Você não tem acesso a este recurso.")).toHaveCount(0);
+    await expect(page.getByRole("navigation").getByRole("link", { name: "Administração" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Central de exames" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Notificações" })).toHaveCount(0);
   });
 
   test("creates a contextual multi-service request through the UI", async ({ page }, testInfo) => {

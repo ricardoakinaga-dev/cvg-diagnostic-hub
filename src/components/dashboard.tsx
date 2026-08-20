@@ -12,6 +12,7 @@ interface Service { id: string; name: string; code: string; workflowType: string
 interface Encounter { id: string; patientId: string; externalId: string; type: "INPATIENT" | "EMERGENCY" | "OUTPATIENT"; status: "OPEN" | "CLOSED"; openedAt: string; closedAt?: string }
 interface Stats { overdue: number; recollections: number; newResults: number; critical: number; totalActive: number; updatedAt: string }
 interface Notification { id: string; category: string; priority: string; title: string; body: string; createdAt: string; state: string; deepLink: string }
+interface SessionUser { displayName: string; role?: string }
 
 const encounterTypeLabels: Record<Encounter["type"], string> = { INPATIENT: "Internação", EMERGENCY: "Emergência", OUTPATIENT: "Atendimento externo" };
 const encounterStatusLabels: Record<Encounter["status"], string> = { OPEN: "Em aberto", CLOSED: "Encerrado" };
@@ -68,6 +69,48 @@ function useDashboardResource<T>(fetcher: () => Promise<T>, fallbackError: strin
 }
 
 export function Dashboard() {
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void apiFetch<{ user: SessionUser }>("/session/me")
+      .then((result) => { if (active) setUser(result.user); })
+      .catch((cause) => { if (active) setError(getSafeErrorMessage(cause, "Não foi possível atualizar a identificação da equipe.")); });
+    return () => { active = false; };
+  }, []);
+
+  if (!user && !error) return <DashboardSkeleton />;
+  if (error) return <div className="error-state" role="alert"><strong>{error}</strong></div>;
+  if (user?.role === "ADMIN") return <TechnicalAdminDashboard displayName={user.displayName} />;
+  return <ClinicalDashboard displayName={user?.displayName ?? "Equipe"} />;
+}
+
+function TechnicalAdminDashboard({ displayName }: { displayName: string }) {
+  const firstName = displayName.split(" ")[0] ?? displayName;
+  return (
+    <div className="dashboard-page admin-landing">
+      <div className="page-heading">
+        <div><p className="eyebrow">Acesso autorizado</p><h1>Administração <em>técnica.</em></h1><p className="page-lede">Olá, {firstName}. Este é o espaço para manter a configuração e os acessos do Hub.</p></div>
+      </div>
+      <div className="admin-policy-banner" role="status"><strong>Perfil técnico</strong><p>Dados clínicos, pacientes e solicitações operacionais permanecem protegidos e disponíveis somente nos perfis assistenciais autorizados.</p></div>
+      <div className="admin-landing-grid">
+        <Link href="/admin" className="panel admin-landing-card">
+          <span className="strip-icon" aria-hidden="true">⚙</span>
+          <span><strong>Configuração e acesso</strong><small>Catálogo de serviços, políticas e usuários do Hub.</small></span>
+          <span className="text-link">Abrir administração <span>→</span></span>
+        </Link>
+        <section className="panel admin-landing-card" aria-label="Escopo protegido">
+          <span className="strip-icon" aria-hidden="true">✦</span>
+          <span><strong>Escopo protegido</strong><small>A separação entre operação clínica e administração técnica está ativa.</small></span>
+          <span className="admin-landing-status">Protegido</span>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function ClinicalDashboard({ displayName }: { displayName: string }) {
   const [showRequest, setShowRequest] = useState(false);
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<Array<{ id: string; label: string; patient: string; deepLink: string; status: string }>>([]);
@@ -76,27 +119,23 @@ export function Dashboard() {
   const fetchStats = useCallback(() => apiFetch<Stats>("/dashboard"), []);
   const fetchNotifications = useCallback(() => apiFetch<Notification[]>("/notifications?filter=UNREAD"), []);
   const fetchServices = useCallback(() => apiFetch<Service[]>("/diagnostic-services"), []);
-  const fetchUser = useCallback(() => apiFetch<{ user: { displayName: string } }>("/session/me"), []);
   const statsTimestamp = useCallback((data: Stats) => typeof data.updatedAt === "string" ? data.updatedAt : receivedAt(), []);
 
   const requestsResource = useDashboardResource(fetchRequests, "Não foi possível atualizar as solicitações.");
   const statsResource = useDashboardResource(fetchStats, "Não foi possível atualizar os indicadores.", statsTimestamp);
   const notificationsResource = useDashboardResource(fetchNotifications, "Não foi possível atualizar as notificações.");
   const servicesResource = useDashboardResource(fetchServices, "Não foi possível atualizar os serviços.");
-  const userResource = useDashboardResource(fetchUser, "Não foi possível atualizar a identificação da equipe.");
   const { load: loadRequests } = requestsResource;
   const { load: loadStats } = statsResource;
   const { load: loadNotifications } = notificationsResource;
   const { load: loadServices } = servicesResource;
-  const { load: loadUser } = userResource;
 
   const reloadAll = useCallback(() => {
     void loadRequests();
     void loadStats();
     void loadNotifications();
     void loadServices();
-    void loadUser();
-  }, [loadNotifications, loadRequests, loadServices, loadStats, loadUser]);
+  }, [loadNotifications, loadRequests, loadServices, loadStats]);
 
   useEffect(() => {
     const refresh = () => reloadAll();
@@ -116,9 +155,9 @@ export function Dashboard() {
   const notifications = notificationsResource.data ?? [];
   const stats = statsResource.data;
   const services = servicesResource.data ?? [];
-  const userName = userResource.data?.user.displayName.split(" ")[1] ?? userResource.data?.user.displayName ?? "equipe";
+  const userName = displayName.split(" ")[1] ?? displayName;
   const activeRequests = useMemo(() => (requestsResource.data ?? []).filter((request) => !["COMPLETED", "CANCELLED"].includes(request.aggregateStatus)), [requestsResource.data]);
-  const initialLoading = [requestsResource, statsResource, notificationsResource, servicesResource, userResource].every((resource) => resource.status === "loading" && resource.data === null);
+  const initialLoading = [requestsResource, statsResource, notificationsResource, servicesResource].every((resource) => resource.status === "loading" && resource.data === null);
 
   if (initialLoading) return <DashboardSkeleton />;
 
