@@ -1,0 +1,75 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "CVG Diagnostics Hub API",
+    "version": "1.0.0-local",
+    "description": "Contrato local verificável da API versionada. Dados são sintéticos; políticas hospitalares e integrações externas continuam condicionais."
+  },
+  "servers": [{ "url": "/api/v1" }],
+  "tags": [
+    { "name": "health" },
+    { "name": "session" },
+    { "name": "diagnostics" },
+    { "name": "results" },
+    { "name": "operations" },
+    { "name": "realtime" }
+  ],
+  "paths": {
+    "/livez": { "get": { "tags": ["health"], "operationId": "livez", "responses": { "200": { "$ref": "#/components/responses/Success" } } } },
+    "/readyz": { "get": { "tags": ["health"], "operationId": "readyz", "responses": { "200": { "$ref": "#/components/responses/Success" }, "503": { "$ref": "#/components/responses/Error" } } } },
+    "/metrics": { "get": { "tags": ["health"], "operationId": "metrics", "security": [{ "session": [] }], "responses": { "200": { "description": "Prometheus text exposition" }, "404": { "$ref": "#/components/responses/Error" } } } },
+    "/session/login": { "post": { "tags": ["session"], "operationId": "login", "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "$ref": "#/components/responses/Success" }, "400": { "$ref": "#/components/responses/Error" }, "401": { "$ref": "#/components/responses/Error" } } } },
+    "/session/me": { "get": { "tags": ["session"], "operationId": "sessionMe", "security": [{ "session": [] }], "responses": { "200": { "$ref": "#/components/responses/Success" }, "401": { "$ref": "#/components/responses/Error" } } } },
+    "/session/logout": { "post": { "tags": ["session"], "operationId": "logout", "security": [{ "session": ["csrf"] }], "responses": { "200": { "$ref": "#/components/responses/Success" }, "401": { "$ref": "#/components/responses/Error" } } } },
+    "/diagnostic-services": { "get": { "$ref": "#/components/operations/read" }, "post": { "$ref": "#/components/operations/command" } },
+    "/diagnostic-services/{serviceId}": { "patch": { "$ref": "#/components/operations/command" } },
+    "/reason-codes": { "post": { "$ref": "#/components/operations/command" } },
+    "/reason-codes/{reasonCodeId}": { "patch": { "$ref": "#/components/operations/command" } },
+    "/patients": { "get": { "$ref": "#/components/operations/read" } },
+    "/patients/{patientId}": { "get": { "$ref": "#/components/operations/read" } },
+    "/encounters/{encounterId}": { "get": { "$ref": "#/components/operations/read" } },
+    "/admissions/{admissionId}": { "get": { "$ref": "#/components/operations/read" } },
+    "/diagnostic-requests": { "get": { "$ref": "#/components/operations/read" }, "post": { "$ref": "#/components/operations/command" } },
+    "/diagnostic-requests/{requestId}": { "get": { "$ref": "#/components/operations/read" } },
+    "/diagnostic-requests/{requestId}/cancel": { "post": { "$ref": "#/components/operations/command" } },
+    "/diagnostic-items/{itemId}": { "get": { "$ref": "#/components/operations/read" } },
+    "/diagnostic-items/{itemId}/{action}": { "post": { "$ref": "#/components/operations/command" } },
+    "/samples/{sampleId}/receive-replacement": { "post": { "$ref": "#/components/operations/command" } },
+    "/procedures/{procedureId}/reschedule": { "post": { "$ref": "#/components/operations/command" } },
+    "/result-versions/{versionId}/attachments/upload-session": { "post": { "$ref": "#/components/operations/command" } },
+    "/attachments/{attachmentId}/content": { "put": { "$ref": "#/components/operations/command" } },
+    "/attachments/{attachmentId}/finalize": { "post": { "$ref": "#/components/operations/command" } },
+    "/attachments/{attachmentId}/download": { "get": { "$ref": "#/components/operations/read" } },
+    "/results/{resultId}": { "get": { "$ref": "#/components/operations/read" } },
+    "/results/{resultId}/versions": { "get": { "$ref": "#/components/operations/read" } },
+    "/results/{resultId}/draft": { "patch": { "$ref": "#/components/operations/command" } },
+    "/results/{resultId}/release": { "post": { "$ref": "#/components/operations/command" } },
+    "/results/{resultId}/amend": { "post": { "$ref": "#/components/operations/command" } },
+    "/results/{resultId}/void": { "post": { "$ref": "#/components/operations/command" } },
+    "/results/{resultId}/view": { "post": { "$ref": "#/components/operations/command" } },
+    "/results/{resultId}/review": { "post": { "$ref": "#/components/operations/command" } },
+    "/notifications": { "get": { "$ref": "#/components/operations/read" } },
+    "/notifications/{notificationId}/acknowledge": { "post": { "$ref": "#/components/operations/command" } },
+    "/queues/{departmentCode}/items": { "get": { "$ref": "#/components/operations/read" } },
+    "/search": { "get": { "$ref": "#/components/operations/read" } },
+    "/timeline": { "get": { "$ref": "#/components/operations/read" } },
+    "/dashboard": { "get": { "$ref": "#/components/operations/read" } },
+    "/realtime/events": { "get": { "tags": ["realtime"], "operationId": "realtimeEvents", "security": [{ "session": [] }], "responses": { "200": { "description": "SSE stream with replay and resync_required" }, "404": { "$ref": "#/components/responses/Error" } } } }
+  },
+  "components": {
+    "securitySchemes": { "session": { "type": "apiKey", "in": "cookie", "name": "cvg_session", "description": "Opaque HttpOnly session cookie; mutating methods also require cvg_csrf and x-csrf-token." } },
+    "requestBodies": { "JsonObject": { "required": true, "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } } },
+    "schemas": {
+      "SuccessEnvelope": { "type": "object", "required": ["success", "data", "meta"], "properties": { "success": { "const": true }, "data": {}, "meta": { "type": "object" } } },
+      "ErrorEnvelope": { "type": "object", "required": ["success", "error", "meta"], "properties": { "success": { "const": false }, "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "string" }, "message": { "type": "string" }, "details": { "type": "object" } } }, "meta": { "type": "object" } } }
+    },
+    "responses": {
+      "Success": { "description": "Envelope de sucesso", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SuccessEnvelope" } } } },
+      "Error": { "description": "Envelope de erro seguro", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } } }
+    },
+    "operations": {
+      "read": { "security": [{ "session": [] }], "responses": { "200": { "$ref": "#/components/responses/Success" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" } } },
+      "command": { "security": [{ "session": ["csrf"] }], "requestBody": { "$ref": "#/components/requestBodies/JsonObject" }, "responses": { "200": { "$ref": "#/components/responses/Success" }, "201": { "$ref": "#/components/responses/Success" }, "400": { "$ref": "#/components/responses/Error" }, "401": { "$ref": "#/components/responses/Error" }, "403": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "422": { "$ref": "#/components/responses/Error" } } }
+    }
+  }
+}

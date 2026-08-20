@@ -1,0 +1,38 @@
+# Threat model
+
+**Knowledge status:** `ASSUMPTION` de ameaça inicial + `DECISION` de mitigação proposta; workshop com TI/clinical owner ainda é `OPEN QUESTION`.
+
+Method: trust boundaries + abuse cases, with mitigation and verification. Severity is preliminary until threat workshop with TI/clinical owner.
+
+| ID | Threat/asset | Vector | Impact | Controls | Verification |
+| --- | --- | --- | --- | --- | --- |
+| THR-001 | Unauthorized result access | guessed request/result/attachment ID (IDOR) | confidentiality/clinical harm | opaque IDs, resource/scope auth, safe 404 | integration security tests |
+| THR-002 | Privilege escalation | client modifies role/department/actor fields | integrity | server derives actor; admin-only role commands; audit | negative API tests |
+| THR-003 | Session theft/fixation | cookie/token exposure | account takeover | secure cookie, TLS, rotation, revocation, headers | session tests/pen test |
+| THR-004 | Brute force | login/search/reconnect flood | availability/access | rate limit, lockout/backoff, alerting | load/abuse test |
+| THR-005 | Malicious upload | MIME spoof, executable/polyglot, oversized file | RCE/data loss | allowlist, sniff, limit, quarantine/scan, private storage | upload corpus tests |
+| THR-006 | XSS/injection | note/result/service text | session/clinical display | output encoding, schema, CSP, parameterized SQL | XSS/SQLi tests |
+| THR-007 | Audit manipulation | privileged update/delete | loss of accountability | append-only table, restricted access, compensating events | audit tamper test |
+| THR-008 | Result misassociation | homonym, wrong sample, external ID collision | clinical harm | patient bundle, encounter constraints, accession chain, confirmation | workflow/E2E tests |
+| THR-009 | Critical notification loss | worker/channel failure or wrong recipient | clinical harm | outbox, retry, ack/escalation, critical queue | failure injection/drill |
+| THR-010 | Replay/double command | retry/double-click | duplicate release/recollection | idempotency + version constraints | repeated/concurrent tests |
+| THR-011 | Data leakage in logs/URLs | full result/token/storage key | privacy | redaction, opaque IDs, signed URLs, log review | static/runtime scan |
+| THR-012 | Backup compromise | exposed bucket/dump | broad disclosure | encryption, IAM, retention, key management, restore isolation | access review |
+| THR-013 | Ransomware/deletion | compromised app/admin/storage | availability/integrity | least privilege, immutable/offline backup, restore runbook | tabletop/restore drill |
+| THR-014 | Stale realtime | client treats event as truth | wrong action | version/refetch, degraded banner | network/reconnect E2E |
+| THR-015 | External integration spoof | unsigned import/webhook | false result/status | signature, provenance, idempotency, quarantine | contract tests |
+
+## Abuse cases to exercise
+
+1. user changes `actorId`, `departmentId`, `patientId` or role in request body;
+2. user opens another department’s result/attachment by copied URL;
+3. attacker uploads valid-looking executable, oversized file and malformed image/PDF;
+4. user repeats release/recollection with same/different payload;
+5. attacker searches wildcard/SQL/XSS payloads or enumerates protocol codes;
+6. worker crashes after commit and before delivery;
+7. two users review/amend the same version;
+8. expired/disabled user keeps SSE connection.
+
+## Residual risk
+
+Critical-value policy, retention, identity provider, network segmentation and real load are not yet validated. Threat model must be revisited after OQ decisions and before production.
