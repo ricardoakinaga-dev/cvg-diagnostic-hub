@@ -5,6 +5,7 @@ import { resetMetrics } from "../../../../server/observability/metrics";
 
 process.env.APP_DATA_MODE = "memory";
 process.env.DEMO_PASSWORD = "api-test-password";
+process.env.LOGIN_RATE_LIMIT = "100";
 
 const params = (path: string[]) => ({ params: Promise.resolve({ path }) });
 
@@ -69,6 +70,21 @@ describe("versioned API boundary", () => {
     expect(response.status).toBe(401);
     expect(body.error.code).toBe("UNAUTHENTICATED");
     expect(JSON.stringify(body)).not.toContain("stack");
+  });
+
+  it("exposes versioned administration reads only to configuration actors", async () => {
+    const admin = await login("admin@cvg.local");
+    const services = await GET(new Request("http://localhost/api/v1/diagnostic-services?includeInactive=true", { headers: { cookie: admin.cookie } }), params(["diagnostic-services"]));
+    expect(services.status).toBe(200);
+    expect((await services.json()).data[0]).toMatchObject({ code: "HEMOGRAM", active: true, version: 1 });
+
+    const reasons = await GET(new Request("http://localhost/api/v1/reason-codes", { headers: { cookie: admin.cookie } }), params(["reason-codes"]));
+    expect(reasons.status).toBe(200);
+    expect((await reasons.json()).data.map((entry: { code: string }) => entry.code)).toContain("HEMOLYZED");
+
+    const vet = await login();
+    const denied = await GET(new Request("http://localhost/api/v1/diagnostic-services?includeInactive=true", { headers: { cookie: vet.cookie } }), params(["diagnostic-services"]));
+    expect(denied.status).toBe(404);
   });
 
   it("creates a request through the authenticated HTTP boundary", async () => {
@@ -171,5 +187,111 @@ describe("versioned API boundary", () => {
     } finally {
       delete process.env.ATTACHMENT_MAX_BYTES;
     }
+  });
+
+  it("rejects unsupported list filters instead of silently returning an empty page", async () => {
+    const auth = await login();
+    const response = await GET(new Request("http://localhost/api/v1/diagnostic-requests?status=NOT_A_STATUS", {
+      headers: { cookie: auth.cookie }
+    }), params(["diagnostic-requests"]));
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("rejects invalid queue limits at the HTTP boundary", async () => {
+    const auth = await login("lab@cvg.local");
+    const response = await GET(new Request("http://localhost/api/v1/queues/LABORATORY/items?limit=-1", {
+      headers: { cookie: auth.cookie }
+    }), params(["queues", "LABORATORY", "items"]));
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("exposes scoped patient diagnostics and audit events through read endpoints", async () => {
+    const vet = await login();
+    const create = await POST(new Request("http://localhost/api/v1/diagnostic-requests", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: vet.cookie,
+        "x-csrf-token": vet.csrf,
+        "idempotency-key": "api-read-model-request"
+      },
+      body: JSON.stringify({
+        patientId: "patient-thor",
+        encounterId: "encounter-thor",
+        priority: "ROUTINE",
+        items: [{ serviceId: "service-hemogram" }]
+      })
+    }), params(["diagnostic-requests"]));
+    expect(create.status).toBe(201);
+
+    const diagnostics = await GET(new Request("http://localhost/api/v1/patients/patient-thor/diagnostics?limit=10", {
+      headers: { cookie: vet.cookie }
+    }), params(["patients", "patient-thor", "diagnostics"]));
+    expect(diagnostics.status).toBe(200);
+    expect((await diagnostics.json()).data.items).toHaveLength(1);
+
+    const manager = await login("manager@cvg.local");
+    const audit = await GET(new Request("http://localhost/api/v1/audit-events?limit=10", {
+      headers: { cookie: manager.cookie }
+    }), params(["audit-events"]));
+    expect(audit.status).toBe(200);
+    expect((await audit.json()).data.length).toBeGreaterThan(0);
+  });
+
+  it("serves a scoped report with attachment metadata after release", async () => {
+    const vet = await login();
+    const create = await POST(new Request("http://localhost/api/v1/diagnostic-requests", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: vet.cookie,
+        "x-csrf-token": vet.csrf,
+        "idempotency-key": "api-report-request"
+      },
+      body: JSON.stringify({
+        patientId: "patient-thor",
+        encounterId: "encounter-thor",
+        priority: "ROUTINE",
+        items: [{ serviceId: "service-hemogram" }]
+      })
+    }), params(["diagnostic-requests"]));
+    const created = await create.json();
+    const itemId = created.data.items[0].id as string;
+
+    const lab = await login("lab@cvg.local");
+    const receive = await POST(new Request(`http://localhost/api/v1/diagnostic-items/${itemId}/receive-sample`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: lab.cookie, "x-csrf-token": lab.csrf, "idempotency-key": "api-report-receive" },
+      body: JSON.stringify({ accessionCode: "ACC-API-REPORT", sampleType: "EDTA" })
+    }), params(["diagnostic-items", itemId, "receive-sample"]));
+    const received = await receive.json();
+    const start = await POST(new Request(`http://localhost/api/v1/diagnostic-items/${itemId}/start-processing`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: lab.cookie, "x-csrf-token": lab.csrf, "idempotency-key": "api-report-start" },
+      body: JSON.stringify({ expectedVersion: received.data.items[0].version })
+    }), params(["diagnostic-items", itemId, "start-processing"]));
+    expect(start.status).toBe(200);
+    const draft = await POST(new Request(`http://localhost/api/v1/diagnostic-items/${itemId}/results`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: lab.cookie, "x-csrf-token": lab.csrf, "idempotency-key": "api-report-draft" },
+      body: JSON.stringify({ narrative: "Hemograma dentro do protocolo.", content: {} })
+    }), params(["diagnostic-items", itemId, "results"]));
+    const draftBody = await draft.json();
+    const release = await POST(new Request(`http://localhost/api/v1/results/${draftBody.data.result.id}/release`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: lab.cookie, "x-csrf-token": lab.csrf, "idempotency-key": "api-report-release" },
+      body: JSON.stringify({})
+    }), params(["results", draftBody.data.result.id, "release"]));
+    expect(release.status).toBe(200);
+
+    const report = await GET(new Request(`http://localhost/api/v1/reports/${draftBody.data.result.id}`, { headers: { cookie: vet.cookie } }), params(["reports", draftBody.data.result.id]));
+    expect(report.status).toBe(200);
+    expect((await report.json()).data).toMatchObject({ result: { id: draftBody.data.result.id }, attachments: [] });
   });
 });

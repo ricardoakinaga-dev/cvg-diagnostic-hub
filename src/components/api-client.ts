@@ -7,6 +7,59 @@ export interface ApiFailure {
   error?: { code?: string; message?: string; details?: Record<string, unknown>; correlationId?: string };
 }
 
+const GENERIC_API_ERROR = "Não foi possível concluir a operação. Informe o código de correlação ao suporte.";
+const SAFE_ERROR_MESSAGES: Record<string, string> = {
+  CSRF_INVALID: "A sessão de segurança expirou. Atualize a página e tente novamente.",
+  IDEMPOTENCY_KEY_REUSED: "Esta operação já foi recebida. Atualize os dados antes de tentar novamente.",
+  NOT_FOUND: "O recurso solicitado não está disponível.",
+  RATE_LIMITED: "Muitas tentativas em pouco tempo. Aguarde e tente novamente.",
+  SCOPE_DENIED: "Você não tem acesso a este recurso.",
+  SESSION_EXPIRED: "Sua sessão expirou. Entre novamente para continuar.",
+  UNAUTHENTICATED: "Sua sessão não está disponível. Entre novamente para continuar.",
+  VALIDATION_ERROR: "Revise os dados informados e tente novamente.",
+};
+
+export class ApiClientError extends Error {
+  readonly code?: string;
+  readonly correlationId?: string;
+  readonly status: number;
+
+  constructor(status: number, failure: ApiFailure) {
+    const code = typeof failure.error?.code === "string" ? failure.error.code : undefined;
+    super((code && SAFE_ERROR_MESSAGES[code]) ?? GENERIC_API_ERROR);
+    this.name = "ApiClientError";
+    this.code = code;
+    this.correlationId = typeof failure.error?.correlationId === "string" ? failure.error.correlationId : undefined;
+    this.status = status;
+  }
+}
+
+export function getSafeErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiClientError ? error.message : fallback;
+}
+
+function normalizeApiFailure(body: unknown): ApiFailure {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return {};
+  const candidate = (body as { error?: unknown }).error;
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return {};
+  const error = candidate as Record<string, unknown>;
+  return {
+    error: {
+      code: typeof error.code === "string" ? error.code : undefined,
+      correlationId: typeof error.correlationId === "string" ? error.correlationId : undefined,
+    },
+  };
+}
+
+function isApiEnvelope<T>(body: unknown): body is ApiEnvelope<T> {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+  const candidate = body as { data?: unknown; meta?: unknown };
+  if (!Object.prototype.hasOwnProperty.call(candidate, "data")) return false;
+  if (typeof candidate.meta !== "object" || candidate.meta === null || Array.isArray(candidate.meta)) return false;
+  const meta = candidate.meta as { correlationId?: unknown; requestId?: unknown };
+  return typeof meta.correlationId === "string" && typeof meta.requestId === "string";
+}
+
 function csrfToken(): string | undefined {
   if (typeof document === "undefined") return undefined;
   return document.cookie.split(";").map((entry) => entry.trim()).find((entry) => entry.startsWith("cvg_csrf="))?.slice("cvg_csrf=".length);
@@ -22,13 +75,16 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     if (!headers.has("idempotency-key")) headers.set("idempotency-key", crypto.randomUUID());
   }
   const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: "include" });
-  const body = (await response.json()) as ApiEnvelope<T> & ApiFailure;
-  if (!response.ok) {
-    const error = new Error(body.error?.message ?? "Não foi possível concluir a operação.") as Error & { code?: string; correlationId?: string };
-    error.code = body.error?.code;
-    error.correlationId = body.error?.correlationId;
-    throw error;
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new ApiClientError(response.status, {});
   }
+  if (!response.ok) {
+    throw new ApiClientError(response.status, normalizeApiFailure(body));
+  }
+  if (!isApiEnvelope<T>(body)) throw new ApiClientError(response.status, {});
   return body.data;
 }
 

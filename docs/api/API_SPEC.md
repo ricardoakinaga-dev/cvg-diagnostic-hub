@@ -51,14 +51,14 @@ List endpoints accept `limit` (default 25, max 100), opaque `cursor`, `sort`, an
 
 | Resource | Endpoints | Primary permission |
 | --- | --- | --- |
-| Patients | `GET /patients`, `GET /patients/{id}` | scoped view |
+| Patients | `GET /patients`, `GET /patients/{id}`, `GET /patients/{id}/diagnostics`, `GET /patients/{id}/encounters` | scoped view |
 | Encounters/admissions | `GET /encounters/{id}`, `GET /admissions/{id}` | scoped view |
 | Diagnostic requests | `POST /diagnostic-requests`, `GET /diagnostic-requests`, `GET /diagnostic-requests/{id}` | create/view scope |
 | Request items | `GET /diagnostic-items/{id}` | item scope |
 | Results | `GET /results/{id}`, `GET /results/{id}/versions` | result scope |
 | Reports/attachments | `GET /reports/{id}`, upload session/finalize/download | result + file scope |
 | Notifications | `GET /notifications`, `POST /notifications/{id}/acknowledge` | recipient |
-| Catalog | `GET /diagnostic-services`, admin commands | config permission |
+| Catalog | `GET /diagnostic-services`, `GET /reason-codes`, admin commands | config permission |
 | Search | `GET /search` | scoped search |
 | Audit/timeline | `GET /audit-events`, `GET /timeline` | scoped/manager |
 | Health | `GET /livez`, `GET /readyz` | liveness/readiness policy |
@@ -72,6 +72,8 @@ Every endpoint below performs a server-side check for each listed canonical perm
 | --- | --- | --- |
 | `GET /patients` | `patient.view` | only authorized patient search fields |
 | `GET /patients/{id}` | `patient.view` | CARE/assigned or explicit manager scope |
+| `GET /patients/{id}/diagnostics` | `patient.view`, `diagnostic.timeline.view` | CARE/assigned patient scope; paginated |
+| `GET /patients/{id}/encounters` | `encounter.view` | patient scope; returns only that patient's encounters |
 | `GET /encounters/{id}` | `encounter.view` | patient/encounter scope |
 | `GET /admissions/{id}` | `admission.view` | WARD/CARE scope |
 | `POST /diagnostic-requests` | `request.create` | duplicate override additionally requires `request.duplicate_override` |
@@ -105,11 +107,11 @@ Every endpoint below performs a server-side check for each listed canonical perm
 | `GET /attachments/{id}/download` | `attachment.download`, `attachment.view` | short-lived authorized download only |
 | `GET /notifications` | `notification.view` | recipient scope; no cross-user listing |
 | `POST /notifications/{id}/acknowledge` | `notification.view`, `notification.acknowledge` | recipient or explicit manager policy |
-| `GET /patients/{id}/diagnostics` | `patient.view`, `diagnostic.timeline.view` | CARE/assigned patient scope |
 | `GET /queues/{departmentCode}/items` | `queue.view` | assigned department; department code is not authority |
 | `GET /timeline` | `timeline.view` | request/item scope and cursor filters |
 | `GET /search` | `search.execute` | every returned record is independently scope-filtered |
 | `GET /diagnostic-services` | `service.catalog.view` | authenticated operational scope |
+| `GET /diagnostic-services?includeInactive=true` | `service.catalog.manage` | admin/delegated manager scope; inactive values remain visible only for configuration |
 | `POST /diagnostic-services/{id}` | `service.catalog.manage` | admin/delegated manager policy; no destructive delete |
 | `PATCH /diagnostic-services/{id}` | `service.catalog.manage` | admin/delegated manager policy; versioned/deactivate only |
 | `POST /sla-policies/{id}` | `sla_policy.manage` | admin/delegated manager policy |
@@ -118,6 +120,7 @@ Every endpoint below performs a server-side check for each listed canonical perm
 | `PATCH /critical-result-policies/{id}` | `critical_result_policy.manage` | admin/delegated manager policy and version guard |
 | `POST /reason-codes/{id}` | `reason_code.manage` | admin/delegated manager policy |
 | `PATCH /reason-codes/{id}` | `reason_code.manage` | admin/delegated manager policy and version guard |
+| `GET /reason-codes` | `reason_code.manage` | configuration actors only; inactive values retained for audit |
 | `POST /users/{id}/roles` | `user_role.manage` | admin/delegated manager policy; audited |
 | role revocation command for `/users/{id}/roles` | `user_role.manage` | admin/delegated manager policy; audited |
 | `GET /audit-events` | `audit.view` | manager/admin or scoped audit policy |

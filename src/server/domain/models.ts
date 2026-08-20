@@ -1,4 +1,5 @@
 import type { ItemState, Permission, Priority, ResultVersionState, RoleCode, WorkflowType } from "@cvg/contracts";
+import { hasPermission } from "../security/authorization";
 import type { Actor } from "../security/authorization";
 
 export type Timestamp = string;
@@ -303,5 +304,5 @@ export function userAsActor(user: User): Actor {
 }
 
 export function hasPermissionForUser(user: User, permission: Permission): boolean {
-  return user.role === "ADMIN" || user.role === "MANAGER" || user.role === "VETERINARIAN" || Boolean(permission);
+  return user.active === true && hasPermission(user.role, permission);
 }

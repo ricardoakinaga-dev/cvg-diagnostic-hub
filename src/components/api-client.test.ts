@@ -19,6 +19,30 @@ describe("browser API client", () => {
     fetchMock.mockRestore();
   });
 
+  it("does not expose an unsafe server error message to the browser", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "postgres://user:password@host/db" } }), { status: 500 }));
+    await expect(apiFetch("/dashboard")).rejects.toMatchObject({ message: "Não foi possível concluir a operação. Informe o código de correlação ao suporte." });
+    fetchMock.mockRestore();
+  });
+
+  it("redacts parser failures for non-JSON responses", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("<html>database password</html>", { status: 502 }));
+    await expect(apiFetch("/dashboard")).rejects.toMatchObject({
+      message: "Não foi possível concluir a operação. Informe o código de correlação ao suporte.",
+      status: 502,
+    });
+    fetchMock.mockRestore();
+  });
+
+  it("rejects a malformed success envelope with a safe client error", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ message: "private server detail" }), { status: 200 }));
+    await expect(apiFetch("/dashboard")).rejects.toMatchObject({
+      message: "Não foi possível concluir a operação. Informe o código de correlação ao suporte.",
+      status: 200,
+    });
+    fetchMock.mockRestore();
+  });
+
   it("formats recent and old timestamps without exposing internal details", () => {
     expect(formatRelativeTime(new Date(Date.now() - 10_000).toISOString())).toBe("agora");
     expect(formatRelativeTime(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())).toBe("há 2 h");

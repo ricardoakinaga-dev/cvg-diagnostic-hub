@@ -19,7 +19,7 @@
 | M5 Results/files | implemented locally | draft edit, release/review/amend/void, immutable versions, checksum/MIME/quarantine/private download, local/S3-compatible factory | external AV, production bucket/credentials and critical policy |
 | M6 Notifications/realtime | implemented locally; conditional | transactional intents, inbox/ack, leased outbox worker, bounded sink, SSE heartbeat/replay/resync/expiry and UI refetch | approved critical fallback/escalation and production broker/worker topology |
 | M7 Operations | implemented locally | scoped search, cursor lists, queues/next action, timeline, dashboard, bounded metrics and perf smoke | representative hospital load and database query plan review |
-| M8 Hardening | implemented locally; conditional | 62 Vitest tests, 95.71% line coverage, 81.12% branches, PostgreSQL/restore smoke, 15 browser E2E, selected axe rules, CI workflow, audit/secret scan | manual accessibility/clinical acceptance, remote CI execution and pilot sign-off |
+| M8 Hardening | implemented locally; conditional | 93 Vitest tests, 94.39% statement coverage, 80.3% branches, PostgreSQL/restore smoke, 21 browser E2E, explicit accessibility suite, CI workflow, audit/secret scan | manual accessibility/clinical acceptance, remote CI execution and pilot sign-off |
 
 The implementation is a single Next.js modular monolith under `src/` plus `packages/contracts`; the original `apps/*` ownership in the planning notes is a target boundary, not a claim that those directories exist. The runtime intentionally remains synthetic/local and must not be presented as hospital-approved.
 

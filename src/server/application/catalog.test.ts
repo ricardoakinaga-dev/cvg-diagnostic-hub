@@ -35,6 +35,7 @@ describe("versioned catalog administration", () => {
     const updated = await service.updateDiagnosticService(admin, created.id, { name: "Tomografia abdominal", active: false, expectedVersion: created.version, idempotencyKey: "catalog-update" });
     expect(updated.active).toBe(false);
     expect(updated.version).toBe(2);
+    expect((await service.listServices(admin, { includeInactive: true })).some((entry) => entry.id === created.id && entry.active === false)).toBe(true);
     await expect(service.updateDiagnosticService(admin, created.id, { expectedVersion: 1, idempotencyKey: "catalog-stale" })).rejects.toMatchObject({ code: "STALE_VERSION" });
     expect(store.getState().auditEvents.some((event) => event.eventType === "DiagnosticServiceUpdated")).toBe(true);
   });
@@ -47,6 +48,7 @@ describe("versioned catalog administration", () => {
     const updated = await service.updateReasonCode(admin, created.id, { active: false, expectedVersion: created.version, idempotencyKey: "reason-update" });
     expect(updated.active).toBe(false);
     expect(updated.version).toBe(2);
+    expect((await service.listReasonCodes(admin)).some((entry) => entry.id === created.id && entry.active === false)).toBe(true);
   });
 
   it("does not let a care actor mutate the catalog", async () => {

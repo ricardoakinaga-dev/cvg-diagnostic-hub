@@ -62,16 +62,16 @@ A rodada só é encerrada quando todos os itens técnicos alcançarem `PASS` ou 
 | ID | Nota local | Evidence | Release status |
 | --- | ---: | --- | --- |
 | BUILD-1 | 96 | Next 16 `proxy.ts`, `npm run build`, `next start`, `/livez`/`/readyz` e perf smoke | CONDITIONAL: ambiente-alvo ainda não é CI/piloto |
-| BUILD-2 | 96 | envelope/correlation, body limit, métricas protegidas e OpenAPI 40 paths validada | PASS local |
+| BUILD-2 | 96 | envelope/correlation, body limit, métricas protegidas e OpenAPI 44 paths validada | PASS local |
 | BUILD-3 | 96 | migration runner incremental, migration 002, PostgreSQL smoke, audit/outbox projection | PASS local |
-| BUILD-4 | 95 | 62 testes de domínio/aplicação/API, transições/idempotência e guardas de policy | PASS local |
+| BUILD-4 | 95 | 93 testes de domínio/aplicação/API/UI, transições/idempotência e guardas de policy | PASS local |
 | BUILD-5 | 95 | session/CSRF/RBAC/scope, rate limit configurável, secret scan e métricas admin-only | CONDITIONAL: IdP/ownership hospitalar |
-| BUILD-6 | 95 | 15/15 Playwright desktop/tablet/mobile e fluxos Lab/RX/US/request | PASS local |
+| BUILD-6 | 95 | 21/21 Playwright desktop/tablet/mobile, incluindo request contextual e resultado/paciente | PASS local |
 | BUILD-7 | 95 | outbox lease/retry/dead-letter, sink bounded, SSE heartbeat/replay/resync, active-connection metric and refetch | CONDITIONAL: canal/fallback crítico aprovado |
 | BUILD-8 | 95 | readiness state/schema/storage, Prometheus bounded gauges, S3/MinIO, private attachments e perf | CONDITIONAL: AV/object storage produtivo |
 | BUILD-9 | 95 | axe rule-set de superfícies críticas, teclado e três viewports | CONDITIONAL: inspeção/aceite humano |
-| BUILD-10 | 96 | 62 testes, 95.71% lines, 81.12% branches, lint/typecheck/build/audit/secret scan | PASS local |
-| BUILD-11 | 95 | restore em banco descartável `1|8|4`, workflow CI e worker one-shot | CONDITIONAL: RPO/RTO e CI remoto |
+| BUILD-10 | 96 | 93 testes, 94.39% statements, 80.3% branches, lint/typecheck/build/audit/secret scan | PASS local |
+| BUILD-11 | 95 | restore em banco descartável `1|18|9`, workflow CI, perf smoke p95 134.54 ms e worker one-shot | CONDITIONAL: RPO/RTO e CI remoto |
 | BUILD-12 | 96 | scorecard/roadmap/backlog, OpenAPI validator, docs validator e estado gauntlet | PASS local |
 
 The scores above are local evidence scores, not a hospital release authorization. Any row marked `CONDITIONAL` remains a release gate until its external evidence is attached.

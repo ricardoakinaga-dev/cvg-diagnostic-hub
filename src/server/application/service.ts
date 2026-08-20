@@ -164,6 +164,15 @@ type VoidCommandResult = { result: Result; version: ResultVersion; item: Diagnos
 type PublicAttachment = Omit<Attachment, "storageKey">;
 type AttachmentSessionResult = { attachment: PublicAttachment; uploadUrl: string; expiresAt: string };
 type AttachmentFinalizationResult = { attachment: PublicAttachment };
+type PatientDiagnosticsResult = {
+  patient: StoreState["patients"][number];
+  items: RequestView[];
+  events: AuditEvent[];
+  nextCursor?: string;
+  limit: number;
+  total: number;
+};
+type ReportView = ResultView & { attachments: PublicAttachment[] };
 
 const MAX_NOTE_LENGTH = 2000;
 const MAX_RESULT_NARRATIVE_LENGTH = 20000;
@@ -471,6 +480,65 @@ function requestViewForActor(state: StoreState, actor: User, request: Diagnostic
   return { ...view, itemIds: items.map((item) => item.id), items };
 }
 
+function canViewRequest(state: StoreState, actor: User, request: DiagnosticRequest): boolean {
+  if (actor.role === "ADMIN") return true;
+  if (isExecutorRole(actor)) {
+    return request.itemIds.some((itemId) => itemFor(state, itemId).departmentCode === actor.departmentCode);
+  }
+  if (actor.role === "MANAGER") {
+    return canAccessResource(actor, "request.view", { departmentCode: request.requestingDepartmentCode });
+  }
+  return Boolean(actor.patientIds?.includes(request.patientId)) && canAccessResource(actor, "request.view", { patientId: request.patientId });
+}
+
+function requestForAuditEvent(state: StoreState, event: AuditEvent): DiagnosticRequest | undefined {
+  if (event.entityType === "DiagnosticRequest") return state.requests.find((request) => request.id === event.entityId);
+  if (event.entityType === "DiagnosticRequestItem") {
+    const item = state.items.find((entry) => entry.id === event.entityId);
+    return item ? state.requests.find((request) => request.id === item.requestId) : undefined;
+  }
+  if (event.entityType === "Sample") {
+    const sample = state.samples.find((entry) => entry.id === event.entityId);
+    return sample ? state.requests.find((request) => request.id === sample.requestId) : undefined;
+  }
+  if (event.entityType === "Result" || event.entityType === "ResultVersion") {
+    const resultId = event.entityType === "Result"
+      ? event.entityId
+      : state.resultVersions.find((version) => version.id === event.entityId)?.resultId;
+    const result = resultId ? state.results.find((entry) => entry.id === resultId) : undefined;
+    const item = result ? state.items.find((entry) => entry.id === result.itemId) : undefined;
+    return item ? state.requests.find((request) => request.id === item.requestId) : undefined;
+  }
+  if (event.entityType === "Procedure" || event.entityType === "ProcedureSchedule") {
+    const procedureId = event.entityType === "Procedure" ? event.entityId : state.schedules.find((schedule) => schedule.id === event.entityId)?.procedureId;
+    const procedure = procedureId ? state.procedures.find((entry) => entry.id === procedureId) : undefined;
+    const item = procedure ? state.items.find((entry) => entry.id === procedure.itemId) : undefined;
+    return item ? state.requests.find((request) => request.id === item.requestId) : undefined;
+  }
+  if (event.entityType === "Attachment") {
+    const attachment = state.attachments.find((entry) => entry.id === event.entityId);
+    const resultVersion = attachment ? state.resultVersions.find((version) => version.id === attachment.resultVersionId) : undefined;
+    const result = resultVersion ? state.results.find((entry) => entry.id === resultVersion.resultId) : undefined;
+    const item = result ? state.items.find((entry) => entry.id === result.itemId) : undefined;
+    return item ? state.requests.find((request) => request.id === item.requestId) : undefined;
+  }
+  return undefined;
+}
+
+function decodeCursor(cursor: string | undefined): number {
+  if (!cursor) return 0;
+  if (!/^[A-Za-z0-9_-]+$/.test(cursor)) throw new ApiError("VALIDATION_ERROR", "Cursor inválido.", 400);
+  const offset = Number.parseInt(Buffer.from(cursor, "base64url").toString("utf8"), 10);
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new ApiError("VALIDATION_ERROR", "Cursor inválido.", 400);
+  return offset;
+}
+
+function pageSize(value: number | undefined): number {
+  const resolved = value ?? DEFAULT_PAGE_SIZE;
+  if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > 100) throw new ApiError("VALIDATION_ERROR", "O limite deve ser um inteiro entre 1 e 100.", 400);
+  return resolved;
+}
+
 function resultView(state: StoreState, result: Result): ResultView {
   const item = itemFor(state, result.itemId);
   const request = requestFor(state, item.requestId);
@@ -601,6 +669,28 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       return requestViewForActor(state, actor, request);
     },
 
+    async getPatientDiagnostics(actor: User, patientId: string, filters: { limit?: number; cursor?: string } = {}): Promise<PatientDiagnosticsResult> {
+      const state = store.getState();
+      const patient = findOrThrow(state.patients.find((entry) => entry.id === patientId));
+      requirePatientPermission(state, actor, "patient.view", patient.id);
+      const limit = pageSize(filters.limit);
+      const offset = decodeCursor(filters.cursor);
+      const requests = state.requests
+        .filter((request) => request.patientId === patient.id && canViewRequest(state, actor, request))
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const page = requests.slice(offset, offset + limit).map((request) => requestViewForActor(state, actor, request));
+      const visibleRequestIds = new Set(requests.map((request) => request.id));
+      const visibleItemIds = new Set(requests.flatMap((request) => request.itemIds));
+      const events = state.auditEvents
+        .filter((event) => {
+          const request = requestForAuditEvent(state, event);
+          return request?.patientId === patient.id && (visibleRequestIds.has(request.id) || (event.entityType === "DiagnosticRequestItem" && visibleItemIds.has(event.entityId)));
+        })
+        .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));
+      const nextCursor = offset + limit < requests.length ? Buffer.from(String(offset + limit)).toString("base64url") : undefined;
+      return { patient: { ...patient }, items: page, events, nextCursor, limit, total: requests.length };
+    },
+
     async getItem(actor: User, itemId: string): Promise<ItemView> {
       const state = store.getState();
       const item = itemFor(state, itemId);
@@ -659,7 +749,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         const rejectionNote = input.note ? requireText(input.note, "note", MAX_NOTE_LENGTH) : undefined;
         const rejectedSample: Sample = { ...sample, status: "REJECTED", rejectionCode: reason.code, rejectionNote, version: sample.version + 1 };
         const replacement: Sample = { id: id("sample"), requestId: request.id, accessionCode: `PENDING-${randomUUID().slice(0, 8).toUpperCase()}`, sampleType: sample.sampleType, status: "EXPECTED", replacesSampleId: sample.id, itemIds: [...sample.itemIds], version: 1 };
-        const updatedItems = linkedItems.map((item) => ({ ...item, status: transitionItem(item.status, "RECOLLECTION_REQUIRED", item.workflowType), version: item.version + 1 }));
+        const updatedItems = linkedItems.map((item) => ({ ...item, status: transitionItem(item.status, "RECOLLECTION_REQUIRED", item.workflowType), currentSampleId: replacement.id, version: item.version + 1 }));
         let nextState = nextRequestState({ ...originalState, samples: [...originalState.samples.filter((entry) => entry.id !== sample.id), rejectedSample, replacement] }, request, updatedItems);
         const requester = findOrThrow(originalState.users.find((user) => user.id === request.requesterId));
         const correlationId = input.correlationId ?? id("corr");
@@ -1112,6 +1202,18 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       return { ...view, request: requestViewForActor(state, actor, view.request) };
     },
 
+    async getReport(actor: User, reportId: string): Promise<ReportView> {
+      const state = store.getState();
+      const result = resultFor(state, reportId);
+      const view = resultView(state, result);
+      requirePermission(actor, "result.view", { patientId: view.request.patientId, departmentCode: view.service.departmentCode });
+      requirePermission(actor, "attachment.view", { patientId: view.request.patientId, departmentCode: view.service.departmentCode });
+      const attachments = state.attachments
+        .filter((attachment) => attachment.resultVersionId === view.version.id)
+        .map(publicAttachment);
+      return { ...view, request: requestViewForActor(state, actor, view.request), attachments };
+    },
+
     async listResultVersions(actor: User, resultId: string): Promise<ResultVersion[]> {
       const state = store.getState();
       const result = resultFor(state, resultId);
@@ -1204,10 +1306,14 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       }
     },
 
-    async listServices(actor: User) {
+    async listServices(actor: User, options: { includeInactive?: boolean } = {}) {
       const state = store.getState();
-      requirePermission(actor, "service.catalog.view", {});
-      return state.services.filter((service) => service.active).map((service) => ({
+      const includeInactive = options.includeInactive === true;
+      if (includeInactive) requirePermission(actor, "service.catalog.manage", {});
+      else requirePermission(actor, "service.catalog.view", {});
+      return state.services
+        .filter((service) => includeInactive ? (actor.role !== "MANAGER" || service.departmentCode === actor.departmentCode) : service.active)
+        .map((service) => ({
         id: service.id,
         code: service.code,
         name: service.name,
@@ -1218,6 +1324,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         requiresSchedule: service.requiresSchedule,
         allowsAttachment: service.allowsAttachment,
         resultSchema: service.resultSchema,
+        active: service.active,
         slaHours: { ...service.slaHours },
         version: service.version
       }));
@@ -1277,6 +1384,12 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       });
     },
 
+    async listReasonCodes(actor: User) {
+      const state = store.getState();
+      requirePermission(actor, "reason_code.manage", {});
+      return state.reasonCodes.map((reason) => ({ ...reason }));
+    },
+
     async createReasonCode(actor: User, input: ReasonCodeCreateInput) {
       const scope = "POST:/reason-codes";
       return store.transaction(async (originalState) => {
@@ -1314,10 +1427,29 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       const state = store.getState();
       requirePermission(actor, "patient.view", {});
       const normalizedQuery = query.trim().toLocaleLowerCase("pt-BR");
+      if (normalizedQuery.length > 200) throw new ApiError("VALIDATION_ERROR", "A busca de pacientes é muito longa.", 400);
       return state.patients
         .filter((patient) => actor.role === "ADMIN" || actor.role === "MANAGER" || actor.patientIds?.includes(patient.id) || (isExecutorRole(actor) && hasServicePatientContext(state, actor, patient.id)))
         .filter((patient) => !normalizedQuery || [patient.displayName, patient.externalId, patient.species, patient.ownerLabel].some((field) => field.toLocaleLowerCase("pt-BR").includes(normalizedQuery)))
-        .map((patient) => ({ ...patient }));
+        .map((patient) => ({ ...patient }))
+        .slice(0, 100);
+    },
+
+    async listAuditEvents(actor: User, filters: { limit?: number; cursor?: string } = {}) {
+      const state = store.getState();
+      requirePermission(actor, "audit.view", { departmentCode: actor.departmentCode });
+      const limit = pageSize(filters.limit);
+      const offset = decodeCursor(filters.cursor);
+      const events = state.auditEvents
+        .filter((event) => {
+          const request = requestForAuditEvent(state, event);
+          if (!request) return actor.role === "ADMIN" || actor.role === "MANAGER";
+          return canViewRequest(state, actor, request);
+        })
+        .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt));
+      const items = events.slice(offset, offset + limit).map((event) => ({ ...event, metadata: { ...event.metadata } }));
+      const nextCursor = offset + limit < events.length ? Buffer.from(String(offset + limit)).toString("base64url") : undefined;
+      return { items, nextCursor, limit, total: events.length };
     },
 
     async getPatient(actor: User, patientId: string) {
@@ -1325,6 +1457,13 @@ export function createApplicationService(store: StateStore, dependencies: { stor
       const patient = findOrThrow(state.patients.find((entry) => entry.id === patientId));
       requirePatientPermission(state, actor, "patient.view", patient.id);
       return patient;
+    },
+
+    async listEncounters(actor: User, patientId: string) {
+      const state = store.getState();
+      const patient = findOrThrow(state.patients.find((entry) => entry.id === patientId));
+      requirePatientPermission(state, actor, "encounter.view", patient.id);
+      return state.encounters.filter((encounter) => encounter.patientId === patient.id).map((encounter) => ({ ...encounter }));
     },
 
     async getEncounter(actor: User, encounterId: string) {
@@ -1345,15 +1484,17 @@ export function createApplicationService(store: StateStore, dependencies: { stor
     async listRequests(actor: User, filters: { status?: ItemState; departmentCode?: string; limit?: number; cursor?: string } = {}) {
       const state = store.getState();
       requirePermission(actor, "request.list", {});
-      const limit = Math.min(Math.max(filters.limit ?? DEFAULT_PAGE_SIZE, 1), 100);
-      const offset = filters.cursor ? Number.parseInt(Buffer.from(filters.cursor, "base64url").toString("utf8"), 10) || 0 : 0;
+      const limit = pageSize(filters.limit);
+      const offset = decodeCursor(filters.cursor);
+      const departmentCode = filters.departmentCode?.trim().toUpperCase();
+      if (departmentCode && !/^[A-Z0-9_-]{1,60}$/.test(departmentCode)) throw new ApiError("VALIDATION_ERROR", "O departamento informado é inválido.", 400);
       const requests = state.requests
         .filter((request) => request.itemIds.some((itemId) => {
           const item = itemFor(state, itemId);
           const service = serviceFor(state, item.serviceId);
           const visibleByPatient = actor.role === "ADMIN" || actor.role === "MANAGER" || Boolean(actor.patientIds?.includes(request.patientId));
           const visibleByService = ["LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM"].includes(actor.role) && service.departmentCode === actor.departmentCode;
-          return (visibleByPatient || visibleByService) && (!filters.status || item.status === filters.status) && (!filters.departmentCode || item.departmentCode === filters.departmentCode);
+          return (visibleByPatient || visibleByService) && (!filters.status || item.status === filters.status) && (!departmentCode || item.departmentCode === departmentCode);
         }))
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
       const page = requests.slice(offset, offset + limit).map((request) => requestViewForActor(state, actor, request));
@@ -1364,6 +1505,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
     async listNotifications(actor: User, filter: "ALL" | "UNREAD" | "ACTIONABLE" | "CRITICAL" = "ALL") {
       const state = store.getState();
       requirePermission(actor, "notification.view", {});
+      if (!["ALL", "UNREAD", "ACTIONABLE", "CRITICAL"].includes(filter)) throw new ApiError("VALIDATION_ERROR", "O filtro de notificações é inválido.", 400);
       return state.notifications
         .filter((notification) => notification.recipientUserId === actor.id)
         .filter((notification) => filter === "ALL" || (filter === "UNREAD" && notification.state !== "SEEN" && notification.state !== "ACKNOWLEDGED") || (filter === "ACTIONABLE" && notification.category === "ACTIONABLE") || (filter === "CRITICAL" && notification.category === "CRITICAL"))
@@ -1389,16 +1531,18 @@ export function createApplicationService(store: StateStore, dependencies: { stor
 
     async listQueue(actor: User, departmentCode: string, filters: { status?: ItemState; overdue?: boolean; limit?: number } = {}) {
       const state = store.getState();
-      requirePermission(actor, "queue.view", { departmentCode });
-      if (actor.role !== "ADMIN" && actor.role !== "MANAGER" && actor.departmentCode !== departmentCode) throw new ApiError("NOT_FOUND", "Fila não encontrada.", 404);
+      const normalizedDepartment = departmentCode.trim().toUpperCase();
+      if (!/^[A-Z0-9_-]{1,60}$/.test(normalizedDepartment)) throw new ApiError("VALIDATION_ERROR", "O departamento informado é inválido.", 400);
+      requirePermission(actor, "queue.view", { departmentCode: normalizedDepartment });
+      if (actor.role !== "ADMIN" && actor.role !== "MANAGER" && actor.departmentCode !== normalizedDepartment) throw new ApiError("NOT_FOUND", "Fila não encontrada.", 404);
       const currentTime = Date.now();
       const priorityRank: Record<Priority, number> = { EMERGENCY: 0, URGENT: 1, ROUTINE: 2 };
       const items = state.items
-        .filter((item) => item.departmentCode === departmentCode)
+        .filter((item) => item.departmentCode === normalizedDepartment)
         .filter((item) => !filters.status || item.status === filters.status)
         .filter((item) => filters.overdue === undefined || (new Date(item.dueAt).getTime() < currentTime && !["COMPLETED", "CANCELLED", "REJECTED"].includes(item.status)) === filters.overdue)
         .sort((left, right) => priorityRank[left.priority] - priorityRank[right.priority] || left.dueAt.localeCompare(right.dueAt))
-        .slice(0, Math.min(filters.limit ?? DEFAULT_PAGE_SIZE, 100));
+        .slice(0, pageSize(filters.limit));
       return items.map((item) => {
         const request = requestFor(state, item.requestId);
         const patient = findOrThrow(state.patients.find((entry) => entry.id === request.patientId));
@@ -1409,6 +1553,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
 
     async search(actor: User, query: string, limit = DEFAULT_PAGE_SIZE) {
       const normalized = query.trim().toLocaleLowerCase("pt-BR");
+      const boundedLimit = pageSize(limit);
       if (normalized.length < 2) throw new ApiError("VALIDATION_ERROR", "Digite pelo menos 2 caracteres ou use um protocolo completo.", 400);
       const state = store.getState();
       requirePermission(actor, "search.execute", {});
@@ -1425,7 +1570,7 @@ export function createApplicationService(store: StateStore, dependencies: { stor
         if (!searchableFields.some((value) => value.toLocaleLowerCase("pt-BR").includes(normalized))) return [];
         return [{ type: "REQUEST", id: request.id, label: request.requestCode, patient: patient.displayName, status: request.aggregateStatus, deepLink: `/requests/${request.id}` }];
       });
-      return results.slice(0, Math.min(limit, 100));
+      return results.slice(0, boundedLimit);
     },
 
     async timeline(actor: User, requestId?: string, itemId?: string) {

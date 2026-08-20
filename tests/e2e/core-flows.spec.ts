@@ -27,6 +27,7 @@ test.describe("operational hub journeys", () => {
     await page.getByRole("button", { name: /Nova solicitação/ }).click({ force: true });
     await expect(page.getByRole("dialog", { name: "Solicitar exames" })).toBeVisible();
     await page.getByLabel("Paciente").selectOption(scenario.patient);
+    await page.getByLabel("Atendimento").selectOption(scenario.patient === "patient-thor" ? "encounter-thor" : "encounter-mel");
     for (const service of scenario.services) await page.getByText(service, { exact: true }).click({ force: true });
     await page.getByRole("button", { name: /Confirmar solicitação/ }).click({ force: true });
     await expect(page.getByRole("dialog")).toBeHidden();
@@ -40,5 +41,26 @@ test.describe("operational hub journeys", () => {
     await page.getByRole("link", { name: /Abrir notificações/ }).click({ force: true });
     await expect(page).toHaveURL(/notifications/);
     await expect(page.getByRole("heading", { name: /Notificações/ })).toBeVisible();
+  });
+
+  test("opens the patient context without exposing an unscoped list", async ({ page }) => {
+    await signIn(page);
+    await page.getByRole("link", { name: /Meus pacientes/ }).click({ force: true });
+    await expect(page).toHaveURL(/\/patients$/);
+    await expect(page.getByRole("heading", { name: /Meus pacientes/ })).toBeVisible();
+    await page.goto("/patients/patient-thor/diagnostics");
+    await expect(page).toHaveURL(/\/patients\/patient-thor\/diagnostics$/);
+    await expect(page.getByRole("heading", { name: /Thor/ })).toBeVisible();
+  });
+
+  test("keeps the dashboard useful when one resource is unavailable", async ({ page }) => {
+    await page.route("**/api/v1/notifications**", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get("filter") === "UNREAD") await route.abort("failed");
+      else await route.continue();
+    });
+    await signIn(page);
+    await expect(page.getByRole("alert").filter({ hasText: "Não foi possível atualizar as notificações." })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Solicitações em andamento" })).toBeVisible();
   });
 });

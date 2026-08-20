@@ -2,6 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
+import { apiFetch, getSafeErrorMessage } from "./api-client";
 
 export function LoginForm() {
   const router = useRouter();
@@ -14,11 +15,9 @@ export function LoginForm() {
     event.preventDefault();
     setSubmitting(true); setError("");
     try {
-      const response = await fetch("/api/v1/session/login", { method: "POST", headers: { "content-type": "application/json" }, credentials: "include", body: JSON.stringify({ email, password }) });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error?.message ?? "Não foi possível entrar.");
+      await apiFetch("/session/login", { method: "POST", body: JSON.stringify({ email, password }) });
       router.replace("/");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Não foi possível entrar."); }
+    } catch (cause) { setError(getSafeErrorMessage(cause, "Não foi possível entrar. Verifique os dados e tente novamente.")); }
     finally { setSubmitting(false); }
   }
 

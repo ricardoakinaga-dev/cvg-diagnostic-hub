@@ -30,6 +30,18 @@ test.describe("accessible operational surfaces", () => {
     await page.goto("/notifications");
     await expect(page.getByRole("heading", { name: /Notificações/ })).toBeVisible();
     await expectNoAxeViolations(page, "notifications");
+
+    await page.goto("/patients");
+    await expect(page.getByRole("heading", { name: /Meus pacientes/ })).toBeVisible();
+    await expectNoAxeViolations(page, "patients");
+
+    await page.goto("/patients/patient-thor/diagnostics");
+    await expect(page.getByRole("heading", { name: /Thor/ })).toBeVisible();
+    await expectNoAxeViolations(page, "patient diagnostics");
+
+    await page.goto("/indicators");
+    await expect(page.getByRole("heading", { name: /Indicadores/ })).toBeVisible();
+    await expectNoAxeViolations(page, "indicators");
   });
 
   test("login form has a keyboard-visible first field and named controls", async ({ page }) => {

@@ -17,6 +17,7 @@ describe("authorized read models", () => {
     expect((await service.listPatients(actor, "thor")).map((entry) => entry.id)).toEqual(["patient-thor"]);
     expect((await service.listPatients(actor, "does-not-exist"))).toEqual([]);
     expect((await service.getPatient(actor, "patient-thor")).displayName).toBe("Thor");
+    expect((await service.listEncounters(actor, "patient-thor")).map((entry) => entry.id)).toEqual(["encounter-thor"]);
     expect((await service.getEncounter(actor, "encounter-thor")).patientId).toBe("patient-thor");
     expect((await service.getAdmission(actor, "admission-thor")).bed).toBe("Box 03");
     expect((await service.getPatient(lab, "patient-thor")).displayName).toBe("Thor");
@@ -84,5 +85,15 @@ describe("authorized read models", () => {
     const scheduled = await service.scheduleProcedure(us, usRequest.items[0].id, { startsAt: "2026-08-25T10:00:00.000Z", endsAt: "2026-08-25T10:30:00.000Z", resource: "US-ACTION", idempotencyKey: "action-us-schedule" });
     expect((await service.listQueue(us, "ULTRASOUND"))[0].nextAction).toBe("Acompanhar item");
     expect(scheduled.item.status).toBe("SCHEDULED");
+  });
+
+  it("rejects invalid pagination at the application boundary", async () => {
+    const store = new MemoryStore(createDemoState());
+    const service = createApplicationService(store);
+    const manager = store.getState().users.find((user) => user.email === "manager@cvg.local");
+    if (!manager) throw new Error("fixture actor missing");
+
+    await expect(service.getPatientDiagnostics(manager, "patient-thor", { limit: 0 })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(service.listAuditEvents(manager, { limit: 101 })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 });

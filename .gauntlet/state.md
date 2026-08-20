@@ -338,3 +338,20 @@ Final retest:
 
 Decision:
 Local technical gates are complete at the synthetic-MVP boundary and score >=95 in all 12 dimensions. Release remains `NOT READY` for hospital use until external evidence closes the conditional/blocked rows; no clinical threshold, SLA, fallback, ownership or retention policy was invented.
+
+### Round 07 — Workflow closure and artifact verification — 2026-08-20
+
+Gap:
+The previous hardening round had green infrastructure evidence but the normative UX still lacked explicit patient/encounter context, server-confirmed workflow actions, result/patient/indicator/admin surfaces and resilient partial-resource handling. Status documents also retained older test/path/performance counts.
+
+Change:
+Implemented scoped patient diagnostics and encounter reads; replaced the request-dialog patient/encounter shortcut with server-loaded context; added workflow actions to queue/request detail; added result review/view/report attachment context; added patient, indicator and administration surfaces with versioned catalog/reason editing and explicit external-policy banner; added safe permission-denied UI; hardened browser error rendering; added bounded strict command schemas and streamed request-body limits; added OpenAPI/API/docs/CI coverage and fresh E2E/accessibility cases.
+
+Retest:
+`npm run validate` → PASS (93 tests; 94.39% statements; 80.3% branches); `npm run build` → PASS; production `next start` → ready on `localhost:3000`; `npm run test:e2e` → 21/21 across desktop/tablet/mobile; `npm run test:accessibility` → 6/6; PostgreSQL persistence/audit/outbox smoke → PASS; disposable restore → PASS (`1|18|9`); perf smoke → 100/100, 0 errors, p95 134.54 ms against 500 ms; outbox one-shot → PASS; OpenAPI → 44 paths; docs → 56 files; secret scan, high-severity npm audit and diff check → PASS.
+
+Critic:
+A fresh compatible default read-only reviewer was commissioned after the specialized reviewer profile was unavailable in this harness, but it did not return within the finalization window and was shut down. A fresh local read-only audit covered the changed API/UI/security paths; no external clinical policy or production approval is inferred from local evidence.
+
+Decision:
+The local technical bar is complete at the synthetic/local boundary. The release remains `NOT READY` for hospital use until identity/ownership, transfer/alta, critical-result policy/fallback, production AV/object storage/credentials, retention/RPO/RTO, representative workload, manual clinical/accessibility acceptance, remote CI and pilot sign-off are evidenced by the responsible external owners.

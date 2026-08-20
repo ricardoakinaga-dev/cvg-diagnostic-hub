@@ -4,6 +4,8 @@
 **Fonte:** [`QUALITY_SCORECARD_95.md`](QUALITY_SCORECARD_95.md) e [`ROADMAP_95.md`](ROADMAP_95.md).  
 **Regra:** `DONE` significa implementado e verificado localmente; `CONDITIONAL` significa tecnicamente pronto, mas dependente de ambiente externo; `BLOCKED` significa que implementar a decisão sem owner seria inseguro.
 
+**Fechamento local W5/W6 (20/08/2026):** os itens técnicos foram verificados novamente no artefato servido. A evidência consolidada é `npm run validate` (93 testes; 94,39% statements; 80,3% branches), build/start, Playwright 21/21, acessibilidade 6/6, OpenAPI 44 paths, docs 56 arquivos, PostgreSQL/restore (`1|18|9`), perf smoke sem erros com p95 134,54 ms e secret/audit scans limpos. `CONDITIONAL` e `BLOCKED EXTERNAL` permanecem gates de ambiente, política ou aceite; não representam aprovação hospitalar.
+
 | ID | Onda | Scorecard | Entrega | Critério de aceite | Teste/evidência | Estado |
 | --- | --- | --- | --- | --- | --- | --- |
 | G95-PLAN-001 | W0 | BUILD-12 | Congelar scorecard, roadmap e backlog | todos os gates têm alvo, owner/dependência e saída | docs validator + revisão | DONE |

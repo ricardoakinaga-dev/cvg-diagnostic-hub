@@ -64,6 +64,16 @@ describe("workflow commands", () => {
     expect(store.getState().auditEvents.some((event) => event.eventType === "DiagnosticItemCancelled")).toBe(true);
   });
 
+  it("points the item at the pending replacement sample during recollection", async () => {
+    const { service, vet, lab } = setup();
+    const request = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-hemogram" }] }, { idempotencyKey: "recollection-context-request" });
+    const received = await service.receiveSample(lab, [request.items[0].id], { accessionCode: "ACC-RECOLLECTION-CONTEXT", sampleType: "EDTA", idempotencyKey: "recollection-context-receive" });
+    const recollection = await service.requestRecollection(lab, received.sample.id, { reasonCode: "HEMOLYZED", idempotencyKey: "recollection-context-requested" });
+
+    expect(recollection.items[0].currentSampleId).toBe(recollection.replacement.id);
+    expect(recollection.replacement.status).toBe("EXPECTED");
+  });
+
   it("keeps released versions immutable through amend, void and replacement release", async () => {
     const { service, vet, lab, admin } = setup();
     const request = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-hemogram" }] }, { idempotencyKey: "result-lifecycle-request" });
