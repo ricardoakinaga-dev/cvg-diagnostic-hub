@@ -13,6 +13,18 @@ describe("browser API client", () => {
     fetchMock.mockRestore();
   });
 
+  it("generates an idempotency key when randomUUID is unavailable on a LAN origin", async () => {
+    document.cookie = "cvg_csrf=csrf-lan";
+    vi.stubGlobal("crypto", { getRandomValues: (bytes: Uint8Array) => { bytes.fill(7); return bytes; } });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ data: { ok: true }, meta: { correlationId: "c", requestId: "r" } }), { status: 200 }));
+
+    await expect(apiFetch<{ ok: boolean }>("/session/login", { method: "POST", body: "{}" })).resolves.toEqual({ ok: true });
+    expect((fetchMock.mock.calls[0][1]?.headers as Headers).get("idempotency-key")).toMatch(/^[0-9a-f-]{32,}$/);
+
+    fetchMock.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
   it("turns safe API failures into useful client errors", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { code: "SCOPE_DENIED", message: "Sem acesso", correlationId: "c" } }), { status: 404 }));
     await expect(apiFetch("/patients/patient-secret")).rejects.toMatchObject({ code: "SCOPE_DENIED", correlationId: "c" });

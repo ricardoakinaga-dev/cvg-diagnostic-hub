@@ -64,13 +64,13 @@ A rodada só é encerrada quando todos os itens técnicos alcançarem `PASS` ou 
 | BUILD-1 | 96 | Next 16 `proxy.ts`, `npm run build`, `next start`, `/livez`/`/readyz` e perf smoke | CONDITIONAL: ambiente-alvo ainda não é CI/piloto |
 | BUILD-2 | 96 | envelope/correlation, body limit, métricas protegidas e OpenAPI 47 paths validada | PASS local |
 | BUILD-3 | 96 | migration runner incremental, migration 002, PostgreSQL smoke, audit/outbox projection | PASS local |
-| BUILD-4 | 95 | 107 testes de domínio/aplicação/API/UI, transições/idempotência e guardas de policy | PASS local |
+| BUILD-4 | 95 | 109 testes de domínio/aplicação/API/UI, transições/idempotência e guardas de policy | PASS local |
 | BUILD-5 | 95 | session/CSRF/RBAC/scope, rate limit configurável, secret scan e métricas admin-only | CONDITIONAL: IdP/ownership hospitalar |
 | BUILD-6 | 95 | 21/21 Playwright desktop/tablet/mobile, incluindo request contextual e resultado/paciente | PASS local |
 | BUILD-7 | 95 | outbox lease/retry/dead-letter, sink bounded, SSE heartbeat/replay/resync, active-connection metric and refetch | CONDITIONAL: canal/fallback crítico aprovado |
 | BUILD-8 | 95 | readiness state/schema/storage, Prometheus bounded gauges, S3/MinIO, private attachments e perf | CONDITIONAL: AV/object storage produtivo |
 | BUILD-9 | 95 | axe rule-set de superfícies críticas, teclado e três viewports | CONDITIONAL: inspeção/aceite humano |
-| BUILD-10 | 96 | 107 testes, 95.4% statements, 81.01% branches, lint/typecheck/build/audit/secret scan | PASS local |
+| BUILD-10 | 96 | 109 testes, 95.35% statements, 81.03% branches, lint/typecheck/build/audit/secret scan | PASS local |
 | BUILD-11 | 95 | restore em banco descartável `1|26|13`, workflow CI, perf smoke p95 434.69 ms e worker one-shot | CONDITIONAL: RPO/RTO e CI remoto |
 | BUILD-12 | 96 | scorecard/roadmap/backlog, OpenAPI validator, docs validator e estado gauntlet | PASS local |
 

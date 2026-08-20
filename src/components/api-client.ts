@@ -65,6 +65,17 @@ function csrfToken(): string | undefined {
   return document.cookie.split(";").map((entry) => entry.trim()).find((entry) => entry.startsWith("cvg_csrf="))?.slice("cvg_csrf=".length);
 }
 
+export function createClientUniqueId(): string {
+  const webCrypto = typeof globalThis.crypto === "undefined" ? undefined : globalThis.crypto;
+  if (typeof webCrypto?.randomUUID === "function") return webCrypto.randomUUID();
+  if (typeof webCrypto?.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    webCrypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("accept", "application/json");
@@ -72,7 +83,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   if (init.method && init.method !== "GET") {
     const token = csrfToken();
     if (token) headers.set("x-csrf-token", token);
-    if (!headers.has("idempotency-key")) headers.set("idempotency-key", crypto.randomUUID());
+    if (!headers.has("idempotency-key")) headers.set("idempotency-key", createClientUniqueId());
   }
   const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: "include" });
   let body: unknown;

@@ -9,6 +9,9 @@ const securityHeaders = [
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Next 16 blocks dev assets requested from a LAN origin unless it is
+  // explicitly allowlisted. Keep this limited to the local demo host.
+  allowedDevOrigins: ["192.168.15.14"],
   turbopack: { root: process.cwd() },
   transpilePackages: ["@cvg/contracts"],
   async headers() {

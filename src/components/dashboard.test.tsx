@@ -92,6 +92,7 @@ describe("Dashboard resilience", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -173,6 +174,27 @@ describe("Dashboard resilience", () => {
     await waitFor(() => expect(apiFetchMock.mock.calls.some(([path, init]) => path === "/diagnostic-requests" && init?.method === "POST")).toBe(true));
     const createCall = apiFetchMock.mock.calls.find(([path, init]) => path === "/diagnostic-requests" && init?.method === "POST");
     expect(JSON.parse(createCall?.[1]?.body as string)).toMatchObject({ encounterId: "encounter-thor-2" });
+  });
+
+  it("submits a request on a LAN origin without crypto.randomUUID", async () => {
+    vi.stubGlobal("crypto", { getRandomValues: (bytes: Uint8Array) => { bytes.fill(7); return bytes; } });
+    const apiFetchMock = mockDashboardResponses((path, init) => {
+      if (path === "/patients/patient-thor/encounters") return Promise.resolve(encounters);
+      if (path === "/diagnostic-requests" && init?.method === "POST") return Promise.resolve({ id: "request-created" });
+      return undefined;
+    });
+
+    render(<Dashboard />);
+    await screen.findByText("Amostra recebida");
+    fireEvent.click(screen.getByRole("button", { name: /Nova solicitação/i }));
+    fireEvent.change(await screen.findByLabelText("Paciente"), { target: { value: "patient-thor" } });
+    fireEvent.change(await screen.findByLabelText("Atendimento"), { target: { value: "encounter-thor-2" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Hemograma/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Confirmar solicitação/i }));
+
+    await waitFor(() => expect(apiFetchMock.mock.calls.some(([path, init]) => path === "/diagnostic-requests" && init?.method === "POST")).toBe(true));
+    const createCall = apiFetchMock.mock.calls.find(([path, init]) => path === "/diagnostic-requests" && init?.method === "POST");
+    expect((createCall?.[1]?.headers as Record<string, string>)["x-correlation-id"]).toMatch(/^ui-[0-9a-f]{32}$/);
   });
 
   it("shows a safe encounter loading error and retries the selected patient", async () => {

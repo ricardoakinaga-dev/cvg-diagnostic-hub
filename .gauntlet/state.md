@@ -373,6 +373,20 @@ The specialized reviewer profile was rejected by the harness because its fixed m
 Decision:
 Local evidence is green at the synthetic boundary. External gates remain explicit: hospital identity/ownership and delegated-manager scope, transfer/alta, critical-result thresholds/fallback, production AV/object storage/credentials, approved retention/RPO/RTO, representative hospital workload, manual accessibility/clinical acceptance, remote CI and pilot sign-off.
 
+### Round 10 — LAN development access hardening and final retest — 2026-08-20
+
+Gap:
+The local app rendered on `localhost`, but opening it through the machine's LAN address stayed on the loading screen. Next 16 rejected development assets from the LAN origin, and plain HTTP on the LAN did not expose `crypto.randomUUID`, which prevented login/request client actions before the API call.
+
+Change:
+Allowlisted only the current local demo host in `allowedDevOrigins`; added a `crypto.getRandomValues`/time fallback for client-generated idempotency and correlation IDs; and added regression tests covering LAN-compatible login/request submission.
+
+Retest:
+`npm run test:coverage` → 109/109, 95.35% statements and 81.03% branches; typecheck/lint/build → PASS; LAN Playwright E2E → 21/21, including accessibility 6/6; OpenAPI → 47 paths; docs → 56 files; secret scan, high-severity audit and diff check → PASS.
+
+Decision:
+The local LAN demo is usable at the current host address. Keep synthetic data and `NOT READY` for hospital use.
+
 ### Round 09 — Authorization hardening, stable pagination and final retest — 2026-08-20
 
 Gap:

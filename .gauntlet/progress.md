@@ -2,16 +2,30 @@
 
 - Goal: Elevar o CVG Diagnostics Hub do estado local atual para uma entrega local/produtiva com scorecard alvo de 95/100 por dimensão; criar plano, roadmap e backlog; implementar melhorias seguras; validar o artefato real; manter gates clínicos/operacionais explícitos.
 - Phase: DISCOVER → DEFINE_BAR → BUILD → RUN → INSPECT → CRITIQUE → FIX → RETEST
-- Current round: 09 (authorization hardening, stable cursors, re-authentication and final retest)
+- Current round: 10 (LAN development access hardening and final retest)
 - Active workstreams: Foundation/contracts, durable events, observability/storage/recovery, web/UX, verification/operations.
 - Frozen bar: [`docs/build/QUALITY_SCORECARD_95.md`](../docs/build/QUALITY_SCORECARD_95.md)
 - Roadmap/backlog: [`docs/build/ROADMAP_95.md`](../docs/build/ROADMAP_95.md) and [`docs/build/BACKLOG_95.md`](../docs/build/BACKLOG_95.md)
-- Final local verification: `npm run test:coverage` PASS (107 testes; 95.4% statements, 81.01% branches); typecheck/lint/build PASS; PostgreSQL persistence/audit/outbox smoke PASS; disposable restore PASS (`1|26|13`); Playwright 21/21 across desktop/tablet/mobile; explicit accessibility suite 6/6; four-route production perf smoke 400 requests/0 errors/max p95 434.69 ms against 500 ms; OpenAPI 47 paths/docs 56 files/secret scan/audit PASS; `git diff --check` PASS.
+- Final local verification: `npm run test:coverage` PASS (109 testes; 95.35% statements, 81.03% branches); typecheck/lint/build PASS; PostgreSQL persistence/audit/outbox smoke PASS; disposable restore PASS (`1|26|13`); Playwright 21/21 across desktop/tablet/mobile, including the LAN URL; explicit accessibility suite 6/6; four-route production perf smoke 400 requests/0 errors/max p95 434.69 ms against 500 ms; OpenAPI 47 paths/docs 56 files/secret scan/audit PASS; `git diff --check` PASS.
 - Current gap: the local technical bar is complete at the documented boundary; external gates remain identity/ownership hospitalar, delegated-manager policy, transferência/alta, critical-result fallback policy, AV/object storage production, retention/RPO/RTO, representative hospital workload, manual accessibility acceptance, remote CI and pilot sign-off.
 - Stop rule: no score is raised without fresh evidence, and no external clinical policy is invented in code or documentation.
 
 Next largest gap:
 External evidence and named ownership. No local technical gate remains without an explicit conditional or blocked status.
+
+## Round 10 — LAN development access hardening and final retest — 2026-08-20
+
+Gap:
+The local app rendered on `localhost`, but opening it through the machine's LAN address stayed on the loading screen. Next 16 rejected development assets from the LAN origin, and plain HTTP on the LAN did not expose `crypto.randomUUID`, which prevented login/request client actions before the API call.
+
+Change:
+Allowlisted only the current local demo host in `allowedDevOrigins`; added a `crypto.getRandomValues`/time fallback for client-generated idempotency and correlation IDs; and added regression tests covering LAN-compatible login/request submission.
+
+Retest:
+`npm run test:coverage` → 109/109, 95.35% statements and 81.03% branches; typecheck/lint/build → PASS; LAN Playwright E2E → 21/21, including accessibility 6/6; OpenAPI → 47 paths; docs → 56 files; secret scan, high-severity audit and diff check → PASS.
+
+Decision:
+The local LAN demo is usable at the current host address. Keep synthetic data and `NOT READY` for hospital use.
 
 ## Round 09 — Authorization hardening, stable pagination and final retest — 2026-08-20
 

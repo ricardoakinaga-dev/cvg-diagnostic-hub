@@ -44,7 +44,7 @@ DATABASE_URL=postgresql://cvg:cvg_dev@localhost:54329/cvg_diagnostics npm run db
 npm run dev
 ```
 
-Abra `http://localhost:3000`. O ambiente de demonstração usa `APP_DATA_MODE=memory` e a senha sintética definida por `DEMO_PASSWORD`; para testar persistência, use `APP_DATA_MODE=postgres` junto com `DATABASE_URL` após a migração.
+Abra `http://localhost:3000`. Neste ambiente, outro dispositivo na mesma rede pode acessar `http://192.168.15.14:3000`; o host LAN está liberado apenas para a demonstração local. O ambiente de demonstração usa `APP_DATA_MODE=memory` e a senha sintética definida por `DEMO_PASSWORD`; para testar persistência, use `APP_DATA_MODE=postgres` junto com `DATABASE_URL` após a migração.
 
 ## Gates de qualidade
 
