@@ -382,7 +382,7 @@ Change:
 Allowlisted only the current local demo host in `allowedDevOrigins`; added a `crypto.getRandomValues`/time fallback for client-generated idempotency and correlation IDs; and added regression tests covering LAN-compatible login/request submission.
 
 Retest:
-`npm run test:coverage` → 109/109, 95.35% statements and 81.03% branches; typecheck/lint/build → PASS; LAN Playwright E2E → 21/21, including accessibility 6/6; OpenAPI → 47 paths; docs → 56 files; secret scan, high-severity audit and diff check → PASS.
+`npm run test:coverage` → 109/109, 95.35% statements and 81.05% branches; typecheck/lint/build → PASS; isolated LAN Playwright E2E → 24/24, including accessibility 6/6 and the request-detail layout regression; OpenAPI → 47 paths; docs → 56 files; secret scan, high-severity audit and diff check → PASS.
 
 Decision:
 The local LAN demo is usable at the current host address. Keep synthetic data and `NOT READY` for hospital use.

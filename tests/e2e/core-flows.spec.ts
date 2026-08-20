@@ -34,6 +34,42 @@ test.describe("operational hub journeys", () => {
     await expect(page.getByText("EX-", { exact: false }).first()).toBeVisible();
   });
 
+  test("keeps request actions inside the items panel", async ({ page }) => {
+    await signIn(page);
+    await page.setViewportSize({ width: 1260, height: 720 });
+    await page.route("**/api/v1/diagnostic-requests/request-layout", async (route) => {
+      await route.fulfill({
+        json: {
+          data: {
+            id: "request-layout",
+            requestCode: "EX-LAYOUT-0001",
+            priority: "URGENT",
+            aggregateStatus: "REQUESTED",
+            createdAt: "2026-08-20T12:00:00.000Z",
+            patient: { displayName: "Thor", species: "Canino", sex: "Macho", externalId: "HIS-THOR-001", ownerLabel: "A. Oliveira" },
+            items: [
+              { id: "item-layout-lab", status: "REQUESTED", workflowType: "LABORATORY", priority: "URGENT", dueAt: "2026-08-20T13:00:00.000Z", version: 1, service: { name: "Hemograma", workflowType: "LABORATORY" } },
+              { id: "item-layout-us", status: "REQUESTED", workflowType: "ULTRASOUND", priority: "URGENT", dueAt: "2026-08-20T13:00:00.000Z", version: 1, service: { name: "Ultrassom abdominal", workflowType: "ULTRASOUND" } }
+            ]
+          },
+          meta: { correlationId: "e2e-layout", requestId: "e2e-layout" }
+        }
+      });
+    });
+    await page.route("**/api/v1/timeline**", async (route) => {
+      await route.fulfill({ json: { data: [{ id: "event-layout", eventType: "Diagnostic Request Created", newState: "REQUESTED", occurredAt: "2026-08-20T12:00:00.000Z" }], meta: { correlationId: "e2e-layout", requestId: "e2e-layout" } } });
+    });
+
+    await page.goto("/requests/request-layout");
+    await expect(page.getByRole("heading", { name: /Thor em acompanhamento/ })).toBeVisible();
+    const itemsPanel = await page.locator(".detail-items").boundingBox();
+    const timelinePanel = await page.locator(".timeline-panel").boundingBox();
+    const action = await page.getByRole("button", { name: "Receber amostra" }).boundingBox();
+    if (!itemsPanel || !timelinePanel || !action) throw new Error("Não foi possível medir os painéis da solicitação.");
+    expect(action.x + action.width).toBeLessThanOrEqual(itemsPanel.x + itemsPanel.width + 1);
+    expect(action.x + action.width).toBeLessThanOrEqual(timelinePanel.x - 8);
+  });
+
   test("keeps navigation usable on a narrow viewport", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await signIn(page);

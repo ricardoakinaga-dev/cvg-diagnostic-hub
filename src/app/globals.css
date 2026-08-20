@@ -263,7 +263,7 @@ em { color: var(--teal); font-family: var(--font-display); font-weight: 400; }
 .detail-heading .priority-badge { margin-top: 9px; }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(310px, .85fr); gap: 14px; }
 .aggregate-status { color: var(--teal-dark); background: var(--teal-soft); text-transform: capitalize; }
-.detail-item { display: grid; grid-template-columns: 35px minmax(0, 1fr) auto 20px; align-items: center; gap: 12px; padding: 17px 22px; border-top: 1px solid var(--line); }
+.detail-item { display: grid; grid-template-columns: 35px minmax(0, 1fr) auto minmax(138px, auto); align-items: center; gap: 12px; padding: 17px 22px; border-top: 1px solid var(--line); }
 .detail-item-icon { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 9px; color: var(--teal); background: var(--teal-soft); font-size: 17px; }
 .detail-item-copy { display: grid; gap: 4px; }
 .detail-item-copy h3 { font-size: 12px; }
