@@ -60,7 +60,7 @@ Gap:
 The repository is empty and has no application architecture, package manager, tests, CI, Docker, migration history, or existing documentation.
 
 Evidence:
-`pwd` → `/home/ricardo/Área de trabalho/cvg-diagnostic-hub`; `ls -la` → only `.` and `..`; `git status` and `git log` → not a Git repository; `rg --files` for manifests/docs → no matches.
+`pwd` → an empty temporary workspace; `ls -la` → only `.` and `..`; `git status` and `git log` → not a Git repository; `rg --files` for manifests/docs → no matches.
 
 Root cause:
 FACT: this is a new documentation-first project, not an existing codebase to extend.
@@ -451,3 +451,25 @@ Final Critic is a fresh local read-only audit of the changed management API, aut
 
 Decision:
 The local technical bar is complete for the requested management outcome. The release remains `NOT READY` for hospital use until external identity/ownership, delegated-manager policy approval, transfer/alta, critical-result thresholds/fallback, production AV/object storage/credentials, retention/RPO/RTO, representative workload, manual clinical/accessibility acceptance, remote CI and pilot sign-off are evidenced by responsible owners.
+
+## Round 12 — Quality Bar v4 recovery and critical-gap closure — 2026-08-22
+
+### Reopened premise
+
+The prior local-complete verdict is superseded. Fresh standards validation found 51
+OpenAPI errors, automated tests were confirmed to run without PostgreSQL, critical
+browser mutations are substantially mocked, and an independent security audit
+reproduced four HIGH local confidentiality/integrity defects.
+
+### Frozen bar and control plane
+
+Quality Bar v4 is frozen in `docs/build/PREMIUM_MVP_V4.md`. Its criteria are binary,
+required and evidence-bound; no aggregate score can compensate for a failure. The
+living ExecPlan, dependency graph and typed evidence are under `.agent/`.
+
+### Current decision
+
+Verdict is `REJECT` for the historical local-complete claim and `NOT READY` for release.
+The next build slice is the RED-first closure of draft confidentiality, exact
+author/service authorization, fail-closed bootstrap and canonical result lineage.
+External hospital and production gates remain blocked and no policy value is invented.

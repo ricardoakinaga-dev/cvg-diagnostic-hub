@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDemoState } from "../store/fixtures";
 import { MemoryStore } from "../store/memory-store";
-import { assertCsrf, authenticateRequest, loginUser, reauthenticateUser, revokeSession } from "./session";
+import { authenticateRequest, loginUser, reauthenticateUser, revokeSession } from "./session";
 
 describe("secure server sessions", () => {
   it("creates an opaque session and authenticates it through a cookie", async () => {
@@ -27,6 +27,26 @@ describe("secure server sessions", () => {
     ).rejects.toMatchObject({ code: "SESSION_EXPIRED", status: 401 });
   });
 
+  it("authenticates against the fresh read boundary instead of a stale inspection cache", async () => {
+    const store = new MemoryStore(createDemoState("fresh-session-password"));
+    const login = await loginUser(store, "vet@cvg.local", "fresh-session-password");
+    const staleState = store.getState();
+    await revokeSession(store, login.sessionToken);
+    const freshnessBoundary = {
+      getState: () => structuredClone(staleState),
+      readState: () => store.readState(),
+      transaction: store.transaction.bind(store)
+    };
+    const request = new Request("http://localhost/api/v1/me", {
+      headers: { cookie: `cvg_session=${login.sessionToken}` }
+    });
+
+    await expect(authenticateRequest(freshnessBoundary, request)).rejects.toMatchObject({
+      code: "SESSION_EXPIRED",
+      status: 401
+    });
+  });
+
   it("records a recent password reauthentication on the opaque session", async () => {
     const store = new MemoryStore(createDemoState("test-password"));
     const login = await loginUser(store, "admin@cvg.local", "test-password");
@@ -41,14 +61,33 @@ describe("secure server sessions", () => {
   });
 
   it("requires the double-submit CSRF token for cookie-authenticated mutations", async () => {
+    const store = new MemoryStore(createDemoState("test-password"));
+    const login = await loginUser(store, "vet@cvg.local", "test-password");
     const request = new Request("http://localhost/api/v1/diagnostic-requests", {
-      headers: { cookie: "cvg_session=session; cvg_csrf=csrf-cookie", "x-csrf-token": "csrf-header" }
+      headers: { cookie: `cvg_session=${login.sessionToken}; cvg_csrf=${login.csrfToken}`, "x-csrf-token": "csrf-header" }
     });
 
-    expect(() => assertCsrf(request)).toThrowError(expect.objectContaining({ code: "CSRF_INVALID" }));
+    await expect(authenticateRequest(store, request, { requireCsrf: true })).rejects.toMatchObject({ code: "CSRF_INVALID" });
     const validRequest = new Request("http://localhost/api/v1/diagnostic-requests", {
-      headers: { cookie: "cvg_session=session; cvg_csrf=csrf-value", "x-csrf-token": "csrf-value" }
+      headers: { cookie: `cvg_session=${login.sessionToken}; cvg_csrf=${login.csrfToken}`, "x-csrf-token": login.csrfToken }
     });
-    expect(() => assertCsrf(validRequest)).not.toThrow();
+    await expect(authenticateRequest(store, validRequest, { requireCsrf: true })).resolves.toMatchObject({ id: "user-vet" });
+  });
+
+  it("rejects matching CSRF cookie and header tokens that belong to another session", async () => {
+    const store = new MemoryStore(createDemoState("test-password"));
+    const authenticatedSession = await loginUser(store, "vet@cvg.local", "test-password");
+    const otherSession = await loginUser(store, "admin@cvg.local", "test-password");
+    const request = new Request("http://localhost/api/v1/diagnostic-requests", {
+      headers: {
+        cookie: `cvg_session=${authenticatedSession.sessionToken}; cvg_csrf=${otherSession.csrfToken}`,
+        "x-csrf-token": otherSession.csrfToken
+      }
+    });
+
+    await expect(authenticateRequest(store, request, { requireCsrf: true })).rejects.toMatchObject({
+      code: "CSRF_INVALID",
+      status: 403
+    });
   });
 });

@@ -20,6 +20,8 @@ describe("strict command schemas", () => {
     expect(sampleSchema.safeParse({ accessionCode: {}, sampleType: "EDTA" }).success).toBe(false);
     expect(cancelSchema.safeParse({ reasonCode: "CLINICAL_DECISION", unexpected: true }).success).toBe(false);
     expect(scheduleSchema.safeParse({ startsAt: "2026-08-25T10:00:00.000Z", endsAt: "2026-08-25T10:30:00.000Z", resource: 42 }).success).toBe(false);
+    expect(scheduleSchema.safeParse({ startsAt: "tomorrow", endsAt: "later", resource: "RX-1" }).success).toBe(false);
+    expect(scheduleSchema.safeParse({ startsAt: "2026-08-25T10:00:00.000Z", endsAt: "2026-08-26T10:00:00.001Z", resource: "RX-1" }).success).toBe(false);
   });
 
   it("enforces bounded clinical text and structured result content", () => {
@@ -41,6 +43,7 @@ describe("strict command schemas", () => {
     expect(attachmentUploadSchema.safeParse(valid).success).toBe(true);
     expect(attachmentUploadSchema.safeParse({ ...valid, sizeBytes: 0 }).success).toBe(false);
     expect(attachmentUploadSchema.safeParse({ ...valid, checksum: "not-a-checksum" }).success).toBe(false);
+    expect(attachmentUploadSchema.safeParse({ ...valid, mimeType: "text/plain" }).success).toBe(false);
     expect(attachmentFinalizeSchema.safeParse({ unexpected: true }).success).toBe(false);
     expect(releaseResultSchema.safeParse({ critical: false }).success).toBe(true);
     expect(voidResultSchema.safeParse({ reason: "Correção", expectedVersion: 1 }).success).toBe(true);

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { StateStore, User } from "../domain/models";
+import type { StateStore, StoreState, User } from "../domain/models";
 import { ApiError } from "../http/envelope";
 import { verifyPassword } from "./password";
 
@@ -56,17 +56,36 @@ export async function loginUser(store: StateStore, email: string, password: stri
   });
 }
 
-export async function authenticateRequest(store: StateStore, request: Request): Promise<User> {
+export async function authenticateRequest(
+  store: StateStore,
+  request: Request,
+  options: { requireCsrf?: boolean } = {}
+): Promise<User> {
   const token = parseCookies(request)[SESSION_COOKIE];
   if (!token) throw new ApiError("UNAUTHENTICATED", "Sessão necessária.", 401);
-  const state = store.getState();
+  const state = await store.readState();
   const session = state.sessions.find((entry) => entry.tokenHash === hash(token));
   if (!session || session.revokedAt || new Date(session.expiresAt).getTime() <= Date.now()) {
     throw new ApiError("SESSION_EXPIRED", "Sessão expirada. Entre novamente.", 401);
   }
+  if (options.requireCsrf) assertCsrf(request, session.csrfTokenHash);
   const user = state.users.find((entry) => entry.id === session.userId && entry.active);
   if (!user) throw new ApiError("SESSION_EXPIRED", "Sessão expirada. Entre novamente.", 401);
   return { ...user, sessionId: session.id, reauthenticatedAt: session.reauthenticatedAt };
+}
+
+export function authorizationSnapshotIsCurrent(state: StoreState, actor: User): boolean {
+  const current = state.users.find((user) => user.id === actor.id);
+  const session = actor.sessionId ? state.sessions.find((entry) => entry.id === actor.sessionId && entry.userId === actor.id) : undefined;
+  return Boolean(
+    current?.active
+    && current.version === actor.version
+    && current.role === actor.role
+    && current.departmentCode === actor.departmentCode
+    && session
+    && !session.revokedAt
+    && new Date(session.expiresAt).getTime() > Date.now()
+  );
 }
 
 export async function reauthenticateUser(store: StateStore, request: Request, password: string): Promise<User> {
@@ -100,11 +119,22 @@ export async function revokeSession(store: StateStore, token: string): Promise<v
   }));
 }
 
-export function assertCsrf(request: Request): void {
+function tokenMatchesHash(token: string, expectedHash: string): boolean {
+  const tokenHash = Buffer.from(hash(token), "hex");
+  const expected = Buffer.from(expectedHash, "hex");
+  return tokenHash.length === expected.length && timingSafeEqual(tokenHash, expected);
+}
+
+function assertCsrf(request: Request, expectedTokenHash: string): void {
   const cookies = parseCookies(request);
   const cookieToken = cookies[CSRF_COOKIE];
   const headerToken = request.headers.get("x-csrf-token");
-  if (!cookieToken || !headerToken || cookieToken.length !== headerToken.length || !timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken))) {
+  if (!cookieToken || !headerToken) {
+    throw new ApiError("CSRF_INVALID", "A confirmação de segurança da sessão é inválida.", 403);
+  }
+  const cookieIsBoundToSession = tokenMatchesHash(cookieToken, expectedTokenHash);
+  const headerIsBoundToSession = tokenMatchesHash(headerToken, expectedTokenHash);
+  if (!cookieIsBoundToSession || !headerIsBoundToSession) {
     throw new ApiError("CSRF_INVALID", "A confirmação de segurança da sessão é inválida.", 403);
   }
 }

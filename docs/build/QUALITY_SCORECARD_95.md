@@ -1,5 +1,9 @@
 # Quality Scorecard 95/100
 
+> **Historical record — superseded on 2026-08-22.** The v4 baseline disproved the
+> local-complete claim below. Current acceptance criteria and status are in
+> [`PREMIUM_MVP_V4.md`](PREMIUM_MVP_V4.md); no 95/96 score is currently asserted.
+
 **Data de congelamento:** 20/08/2026  
 **Escopo:** elevar o artefato local executável do CVG Diagnostics Hub, sem transformar decisão clínica ou aprovação hospitalar em implementação técnica.  
 **Regra de pontuação:** cada dimensão recebe uma nota de 0 a 100. A meta técnica desta rodada é `>=95` em cada dimensão; um gate externo só pode ser marcado como resolvido depois de evidência e aprovação do responsável.

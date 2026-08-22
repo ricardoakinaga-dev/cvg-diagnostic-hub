@@ -16,6 +16,12 @@ export class MemoryStore implements StateStore {
     return cloneState(this.state);
   }
 
+  async readState(): Promise<StoreState> {
+    const run = this.queue.then(() => this.getState());
+    this.queue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   async transaction<T>(
     operation: (state: StoreState) => Promise<{ state: StoreState; result: T }> | { state: StoreState; result: T }
   ): Promise<T> {
@@ -33,7 +39,7 @@ export class MemoryStore implements StateStore {
   }
 
   async healthcheck(): Promise<void> {
-    const state = this.getState();
+    const state = await this.readState();
     const collections: (keyof typeof state)[] = ["users", "sessions", "patients", "encounters", "admissions", "services", "reasonCodes", "requests", "items", "samples", "procedures", "schedules", "results", "resultVersions", "notifications", "auditEvents", "outbox", "idempotency", "attachments"];
     if (!Number.isSafeInteger(state.protocolSequence) || state.protocolSequence < 0 || collections.some((key) => !Array.isArray(state[key]))) {
       throw new Error("MEMORY_RUNTIME_STATE_INVALID");

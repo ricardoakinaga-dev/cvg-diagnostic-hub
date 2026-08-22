@@ -1,5 +1,9 @@
 # Roadmap de melhoria para 95/100
 
+> **Historical roadmap — superseded on 2026-08-22.** The active execution plan is
+> [`.agent/plans/premium-enterprise-mvp-v4.md`](../../.agent/plans/premium-enterprise-mvp-v4.md)
+> and its frozen bar is [`PREMIUM_MVP_V4.md`](PREMIUM_MVP_V4.md).
+
 **Data:** 20/08/2026  
 **Objetivo:** elevar cada dimensão do [`QUALITY_SCORECARD_95.md`](QUALITY_SCORECARD_95.md) para pelo menos 95/100 no ambiente local reproduzível e deixar os gates externos prontos para decisão humana.
 

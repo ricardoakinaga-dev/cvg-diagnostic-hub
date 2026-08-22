@@ -4,11 +4,11 @@ import { z } from "zod";
 import { createApplicationService } from "../../../../server/application/service";
 import { createSuccessResponse, toApiErrorResponse } from "../../../../server/http/envelope";
 import { getRuntimeFileStore, getRuntimeReadiness, getRuntimeStoreAsync } from "../../../../server/store/runtime";
-import { assertCsrf, authenticateRequest, clearSessionCookies, getCookieValue, loginUser, reauthenticateUser, revokeSession, sessionCookies } from "../../../../server/security/session";
+import { authenticateRequest, authorizationSnapshotIsCurrent, clearSessionCookies, getCookieValue, loginUser, reauthenticateUser, revokeSession, sessionCookies } from "../../../../server/security/session";
 import type { CommandMeta, SearchResultType } from "../../../../server/application/service";
 import { ApiError } from "../../../../server/http/envelope";
 import { canAccessResource } from "../../../../server/security/authorization";
-import type { User } from "../../../../server/domain/models";
+import type { StoreState, User } from "../../../../server/domain/models";
 import { assertRateLimit } from "../../../../server/security/rate-limit";
 import { incrementGauge, recordHttpRequest, recordReadinessFailure, refreshOperationalMetrics, renderPrometheus, routeMetricLabel } from "../../../../server/observability/metrics";
 import { ITEM_STATES, PRIORITIES, ROLES } from "@cvg/contracts";
@@ -28,25 +28,41 @@ import {
   scheduleSchema,
   voidResultSchema
 } from "../../../../server/http/command-schemas";
-import { readBytesWithLimit } from "../../../../server/http/request-body";
+import { readBytesWithLimit, readJsonWithLimit } from "../../../../server/http/request-body";
+import { matchApiOperation, type ApiOperation } from "../../../../server/http/api-operation-manifest";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
+const codePointLength = (value: string) => Array.from(value).length;
+const boundedString = (minimum: number, maximum: number) => z.string().refine(
+  (value) => codePointLength(value) >= minimum && codePointLength(value) <= maximum,
+  `text must contain between ${minimum} and ${maximum} Unicode characters`
+);
+const expectedVersionSchema = z.number().int().positive().max(999_999_999_999_999);
+const queryDateTimeSchema = z.string().max(100).datetime({ offset: true }).refine((value) => Number.isFinite(Date.parse(value)));
+const serviceIdentifierSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
+const normalizedText = (minimum: number, maximum: number) => z.string().transform((value) => value.trim()).refine(
+  (value) => codePointLength(value) >= minimum && codePointLength(value) <= maximum,
+  `text must contain between ${minimum} and ${maximum} Unicode characters after trimming`
+);
+const departmentCodeSchema = z.string().trim().regex(/^[A-Za-z0-9_-]{1,60}$/);
+const catalogCodeSchema = z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_]{1,59}$/);
+
 const createRequestSchema = z.object({
-  patientId: z.string().min(1).max(100),
-  encounterId: z.string().min(1).max(100),
-  admissionId: z.string().min(1).max(100).optional(),
+  patientId: boundedString(1, 100),
+  encounterId: boundedString(1, 100),
+  admissionId: boundedString(1, 100).optional(),
   priority: z.enum(["ROUTINE", "URGENT", "EMERGENCY"]),
-  items: z.array(z.object({ serviceId: z.string().min(1).max(100), note: z.string().max(2000).optional() })).min(1).max(20),
-  overrideReason: z.string().max(500).optional()
+  items: z.array(z.object({ serviceId: boundedString(1, 100), note: normalizedText(1, 2000).optional() }).strict()).min(1).max(20),
+  overrideReason: normalizedText(1, 500).optional()
 }).strict();
 
-const loginSchema = z.object({ email: z.string().email().max(320), password: z.string().min(1).max(200) }).strict();
+const loginSchema = z.object({ email: z.string().email().refine((value) => codePointLength(value) <= 320), password: boundedString(1, 200) }).strict();
 const serviceCreateSchema = z.object({
-  code: z.string().min(2).max(60),
-  name: z.string().min(1).max(120),
+  code: catalogCodeSchema,
+  name: normalizedText(1, 120),
   category: z.enum(["LABORATORY", "IMAGING"]),
-  departmentCode: z.string().min(1).max(60),
+  departmentCode: departmentCodeSchema,
   workflowType: z.enum(["LABORATORY", "RADIOLOGY", "ULTRASOUND"]),
   requiresSample: z.boolean(),
   requiresSchedule: z.boolean(),
@@ -54,14 +70,14 @@ const serviceCreateSchema = z.object({
   resultSchema: z.enum(["NUMERIC_PANEL", "NARRATIVE"]),
   slaHours: z.object({ ROUTINE: z.number().positive().max(720), URGENT: z.number().positive().max(720), EMERGENCY: z.number().positive().max(720) }).strict()
 }).strict();
-const servicePatchSchema = z.object({ name: z.string().min(1).max(120).optional(), category: z.enum(["LABORATORY", "IMAGING"]).optional(), departmentCode: z.string().min(1).max(60).optional(), workflowType: z.enum(["LABORATORY", "RADIOLOGY", "ULTRASOUND"]).optional(), requiresSample: z.boolean().optional(), requiresSchedule: z.boolean().optional(), active: z.boolean().optional(), allowsAttachment: z.boolean().optional(), resultSchema: z.enum(["NUMERIC_PANEL", "NARRATIVE"]).optional(), slaHours: z.object({ ROUTINE: z.number().positive().max(720), URGENT: z.number().positive().max(720), EMERGENCY: z.number().positive().max(720) }).strict().optional(), expectedVersion: z.number().int().positive().optional() }).strict();
-const reasonCreateSchema = z.object({ type: z.enum(["RECOLLECTION", "CANCEL", "REJECT", "AMEND"]), code: z.string().min(2).max(60), label: z.string().min(1).max(160) }).strict();
-const reasonPatchSchema = z.object({ label: z.string().min(1).max(160).optional(), active: z.boolean().optional(), expectedVersion: z.number().int().positive().optional() }).strict();
-const reauthenticationSchema = z.object({ password: z.string().min(1).max(200) }).strict();
-const managedDepartmentCodesSchema = z.array(z.string().min(1).max(60)).max(20).optional();
-const userRoleSchema = z.object({ role: z.enum(ROLES), departmentCode: z.string().min(1).max(60), managedDepartmentCodes: managedDepartmentCodesSchema, active: z.boolean().optional(), expectedVersion: z.number().int().positive(), reason: z.string().min(1).max(500), confirm: z.literal(true) }).strict();
-const userCreateSchema = z.object({ email: z.string().email().max(320), displayName: z.string().min(2).max(160), password: z.string().min(12).max(200), role: z.enum(ROLES), departmentCode: z.string().min(1).max(60), managedDepartmentCodes: managedDepartmentCodesSchema, timezone: z.string().min(1).max(80), reason: z.string().min(1).max(500), confirm: z.literal(true) }).strict();
-const userDeactivateSchema = z.object({ expectedVersion: z.number().int().positive(), reason: z.string().min(1).max(500), confirm: z.literal(true) }).strict();
+const servicePatchSchema = z.object({ name: normalizedText(1, 120).optional(), category: z.enum(["LABORATORY", "IMAGING"]).optional(), departmentCode: departmentCodeSchema.optional(), workflowType: z.enum(["LABORATORY", "RADIOLOGY", "ULTRASOUND"]).optional(), requiresSample: z.boolean().optional(), requiresSchedule: z.boolean().optional(), active: z.boolean().optional(), allowsAttachment: z.boolean().optional(), resultSchema: z.enum(["NUMERIC_PANEL", "NARRATIVE"]).optional(), slaHours: z.object({ ROUTINE: z.number().positive().max(720), URGENT: z.number().positive().max(720), EMERGENCY: z.number().positive().max(720) }).strict().optional(), expectedVersion: expectedVersionSchema.optional() }).strict();
+const reasonCreateSchema = z.object({ type: z.enum(["RECOLLECTION", "CANCEL", "REJECT", "AMEND"]), code: catalogCodeSchema, label: normalizedText(1, 160) }).strict();
+const reasonPatchSchema = z.object({ label: normalizedText(1, 160).optional(), active: z.boolean().optional(), expectedVersion: expectedVersionSchema.optional() }).strict();
+const reauthenticationSchema = z.object({ password: boundedString(1, 200) }).strict();
+const managedDepartmentCodesSchema = z.array(departmentCodeSchema).max(20).optional();
+const userRoleSchema = z.object({ role: z.enum(ROLES), departmentCode: departmentCodeSchema, managedDepartmentCodes: managedDepartmentCodesSchema, active: z.boolean().optional(), expectedVersion: expectedVersionSchema.optional(), reason: normalizedText(1, 500), confirm: z.literal(true) }).strict();
+const userCreateSchema = z.object({ email: z.string().email().refine((value) => codePointLength(value) <= 320), displayName: normalizedText(2, 160), password: boundedString(12, 200), role: z.enum(ROLES), departmentCode: departmentCodeSchema, managedDepartmentCodes: managedDepartmentCodesSchema, timezone: normalizedText(1, 80), reason: normalizedText(1, 500), confirm: z.literal(true) }).strict();
+const userDeactivateSchema = z.object({ expectedVersion: expectedVersionSchema.optional(), reason: normalizedText(1, 500), confirm: z.literal(true) }).strict();
 
 function correlationFrom(request: Request): string {
   const supplied = request.headers.get("x-correlation-id")?.trim();
@@ -89,11 +105,10 @@ function errorFor(error: unknown, correlationId: string, id: string): NextRespon
 }
 
 async function jsonBody(request: Request): Promise<unknown> {
-  try {
-    return await request.json();
-  } catch {
-    throw new ApiError("VALIDATION_ERROR", "O corpo JSON da requisição é inválido.", 400);
-  }
+  return readJsonWithLimit(request, {
+    maxBytes: positiveInteger(process.env.JSON_BODY_MAX_BYTES, 1024 * 1024),
+    maxDepth: positiveInteger(process.env.JSON_BODY_MAX_DEPTH, 32)
+  });
 }
 
 async function objectBody(request: Request): Promise<Record<string, unknown>> {
@@ -108,20 +123,57 @@ function parseCommandBody<T>(body: Record<string, unknown>, schema: z.ZodType<T>
   return parsed.data;
 }
 
-function commandMeta(request: Request, body: Record<string, unknown>): CommandMeta {
-  const expectedVersion = body.expectedVersion;
-  const ifMatch = request.headers.get("if-match")?.replace(/^W\//, "").replace(/^"|"$/g, "");
-  const headerVersion = ifMatch && /^\d+$/.test(ifMatch) ? Number(ifMatch) : undefined;
+function commandMeta(request: Request, body: Record<string, unknown>, operation: ApiOperation): CommandMeta {
+  const bodyVersion = typeof body.expectedVersion === "number" ? body.expectedVersion : undefined;
+  const rawIfMatch = request.headers.get("if-match");
+  let headerVersion: number | undefined;
+  if (rawIfMatch !== null) {
+    const match = /^(?:([1-9][0-9]{0,14})|"([1-9][0-9]{0,14})"|W\/"([1-9][0-9]{0,14})")$/.exec(rawIfMatch);
+    if (!match) throw new ApiError("VALIDATION_ERROR", "O cabeçalho If-Match é inválido.", 400);
+    headerVersion = Number(match[1] ?? match[2] ?? match[3]);
+  }
+  if (bodyVersion !== undefined && headerVersion !== undefined && bodyVersion !== headerVersion) {
+    throw new ApiError("VALIDATION_ERROR", "If-Match e expectedVersion devem informar a mesma versão.", 400);
+  }
+  if (operation.concurrencyGuard && bodyVersion === undefined && headerVersion === undefined) {
+    throw new ApiError("VALIDATION_ERROR", "expectedVersion ou If-Match é obrigatório para esta operação.", 400);
+  }
   return {
     idempotencyKey: request.headers.get("idempotency-key") ?? undefined,
-    expectedVersion: typeof expectedVersion === "number" ? expectedVersion : headerVersion,
+    expectedVersion: bodyVersion ?? headerVersion,
     correlationId: request.headers.get("x-correlation-id") ?? undefined
   };
 }
 
+const REQUEST_HEADER_VALIDATORS = Object.freeze({
+  "x-correlation-id": (value: string) => /^[A-Za-z0-9._:-]{1,100}$/.test(value),
+  "x-csrf-token": (value: string) => codePointLength(value) >= 1 && codePointLength(value) <= 500,
+  "idempotency-key": (value: string) => codePointLength(value) >= 1 && codePointLength(value) <= 200 && /\S/.test(value),
+  "if-match": (value: string) => /^(?:[1-9][0-9]{0,14}|"[1-9][0-9]{0,14}"|W\/"[1-9][0-9]{0,14}")$/.test(value),
+  "last-event-id": (value: string) => codePointLength(value) >= 1 && codePointLength(value) <= 200,
+  "x-duplicate-override": (value: string) => value === "true"
+} satisfies Record<ApiOperation["requestHeaders"][number]["name"], (value: string) => boolean>);
+
+function validateRequestHeaders(request: Request, operation: ApiOperation): void {
+  for (const header of operation.requestHeaders) {
+    const value = request.headers.get(header.name);
+    if (value === null) {
+      if (header.name === "idempotency-key" && header.required) {
+        throw new ApiError("IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key é obrigatório para esta operação.", 400);
+      }
+      continue;
+    }
+    const validator = REQUEST_HEADER_VALIDATORS[header.name];
+    if (!validator(value)) {
+      const code = header.name === "idempotency-key" && header.required ? "IDEMPOTENCY_KEY_REQUIRED" : "VALIDATION_ERROR";
+      throw new ApiError(code, `O cabeçalho ${header.name} é inválido.`, 400);
+    }
+  }
+}
+
 async function pathFor(context: RouteContext): Promise<string[]> {
   const params = await context.params;
-  return params.path.map((segment) => decodeURIComponent(segment));
+  return [...params.path];
 }
 
 async function dispatch(method: string, request: Request, context: RouteContext): Promise<Response> {
@@ -142,15 +194,16 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
   const id = requestId();
   try {
     const path = await pathFor(context);
+    const operation = matchApiOperation(method, path);
+    if (!operation) throw new ApiError("NOT_FOUND", "Rota não encontrada.", 404);
+    validateRequestHeaders(request, operation);
     const clientAddress = process.env.TRUST_PROXY === "true"
       ? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "forwarded-client"
       : "local-client";
     const loginRateLimit = positiveInteger(process.env.LOGIN_RATE_LIMIT, 10);
-    assertRateLimit(`${clientAddress}:${path.slice(0, 2).join("/")}`, path[0] === "session" && path[1] === "login" ? loginRateLimit : 240, 60_000);
-    const isLogin = path.join("/") === "session/login";
-    const isPublic = path[0] === "livez" || path[0] === "readyz" || isLogin;
-    if (method !== "GET" && !isLogin) assertCsrf(request);
-
+    assertRateLimit(`${clientAddress}:${operation.operationId}`, operation.operationId === "login" ? loginRateLimit : 240, 60_000);
+    const isLogin = operation.operationId === "login";
+    const isPublic = operation.authentication === "public";
     if (path[0] === "livez" && method === "GET") return responseFor({ status: "ok", service: "cvg-diagnostics-hub" }, correlationId, id);
     if (path[0] === "readyz" && method === "GET") {
       try {
@@ -172,10 +225,13 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       return response;
     }
 
-    const actor = await authenticateRequest(store, request);
+    const actor = await authenticateRequest(store, request, { requireCsrf: operation.csrf });
+    if (operation.operationId === "uploadAttachmentContent") {
+      assertRateLimit(`${clientAddress}:${actor.id}:attachment-content`, positiveInteger(process.env.ATTACHMENT_UPLOAD_RATE_LIMIT, 30), 60_000);
+    }
     if (path[0] === "metrics" && method === "GET") {
       if (!canAccessResource(actor, "health.readiness", {})) throw new ApiError("NOT_FOUND", "Rota não encontrada.", 404);
-      const state = store.getState();
+      const state = await store.readState();
       refreshOperationalMetrics(state);
       const body = renderPrometheus();
       return new Response(body, { status: 200, headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store", "x-correlation-id": correlationId } });
@@ -200,53 +256,53 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       const body = await objectBody(request);
       const parsed = userCreateSchema.safeParse(body);
       if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados do colaborador são inválidos.", 400);
-      return responseFor(await service.createManagedUser(actor, { ...parsed.data, ...commandMeta(request, body) }), correlationId, id, 201);
+      return responseFor(await service.createManagedUser(actor, { ...parsed.data, ...commandMeta(request, body, operation) }), correlationId, id, 201);
     }
     if (path[0] === "users" && path.length === 2 && method === "DELETE") {
       const body = await objectBody(request);
       const parsed = userDeactivateSchema.safeParse(body);
       if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados de desativação são inválidos.", 400);
-      return responseFor(await service.deactivateManagedUser(actor, path[1], { ...parsed.data, ...commandMeta(request, body) }), correlationId, id);
+      return responseFor(await service.deactivateManagedUser(actor, path[1], { ...parsed.data, ...commandMeta(request, body, operation) }), correlationId, id);
     }
     if (path[0] === "users" && path.length === 3 && path[2] === "roles" && method === "POST") {
       const body = await objectBody(request);
       const parsed = userRoleSchema.safeParse(body);
       if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados de role são inválidos.", 400);
-      return responseFor(await service.updateUserRole(actor, path[1], { ...parsed.data, ...commandMeta(request, body) }), correlationId, id);
+      return responseFor(await service.updateUserRole(actor, path[1], { ...parsed.data, ...commandMeta(request, body, operation) }), correlationId, id);
     }
 
     if (path[0] === "diagnostic-services" && method === "GET" && path.length === 1) {
-      const includeInactive = new URL(request.url).searchParams.get("includeInactive") === "true";
+      const includeInactive = parseBooleanFilter(new URL(request.url).searchParams.get("includeInactive"), "includeInactive") ?? false;
       return responseFor(await service.listServices(actor, { includeInactive }), correlationId, id);
     }
     if (path[0] === "diagnostic-services" && path.length === 1 && method === "POST") {
       const body = await objectBody(request);
       const parsed = serviceCreateSchema.safeParse(body);
       if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados do serviço são inválidos.", 400);
-      return responseFor(await service.createDiagnosticService(actor, { ...parsed.data, ...commandMeta(request, body) }), correlationId, id, 201);
+      return responseFor(await service.createDiagnosticService(actor, { ...parsed.data, ...commandMeta(request, body, operation) }), correlationId, id, 201);
     }
     if (path[0] === "diagnostic-services" && path.length === 2 && method === "PATCH") {
       const body = await objectBody(request);
       const parsed = servicePatchSchema.safeParse(body);
       if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados do serviço são inválidos.", 400);
-      return responseFor(await service.updateDiagnosticService(actor, path[1], { ...parsed.data, ...commandMeta(request, body) }), correlationId, id);
+      return responseFor(await service.updateDiagnosticService(actor, path[1], { ...parsed.data, ...commandMeta(request, body, operation) }), correlationId, id);
     }
     if (path[0] === "reason-codes" && path.length === 1 && method === "POST") {
       const body = await objectBody(request);
       const parsed = reasonCreateSchema.safeParse(body);
       if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados do motivo são inválidos.", 400);
-      return responseFor(await service.createReasonCode(actor, { ...parsed.data, ...commandMeta(request, body) }), correlationId, id, 201);
+      return responseFor(await service.createReasonCode(actor, { ...parsed.data, ...commandMeta(request, body, operation) }), correlationId, id, 201);
     }
     if (path[0] === "reason-codes" && path.length === 2 && method === "PATCH") {
       const body = await objectBody(request);
       const parsed = reasonPatchSchema.safeParse(body);
       if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados do motivo são inválidos.", 400);
-      return responseFor(await service.updateReasonCode(actor, path[1], { ...parsed.data, ...commandMeta(request, body) }), correlationId, id);
+      return responseFor(await service.updateReasonCode(actor, path[1], { ...parsed.data, ...commandMeta(request, body, operation) }), correlationId, id);
     }
     if (path[0] === "reason-codes" && path.length === 1 && method === "GET") return responseFor(await service.listReasonCodes(actor), correlationId, id);
     if (path[0] === "patients" && method === "GET" && path.length === 1) {
       const query = new URL(request.url).searchParams.get("q") ?? "";
-      if (query.length > 200) throw new ApiError("VALIDATION_ERROR", "A busca de pacientes é muito longa.", 400);
+      if (codePointLength(query) > 200) throw new ApiError("VALIDATION_ERROR", "A busca de pacientes é muito longa.", 400);
       return responseFor(await service.listPatients(actor, query), correlationId, id);
     }
     if (path[0] === "patients" && path.length === 3 && path[2] === "diagnostics" && method === "GET") {
@@ -264,10 +320,10 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
         status: parseItemState(search.get("status")),
         departmentCode: search.get("departmentCode") ?? search.get("departmentId") ?? undefined,
         priority: parsePriority(search.get("priority")),
-        serviceId: search.get("serviceId") ?? undefined,
+        serviceId: parseServiceIdentifier(search.get("serviceId")),
         overdue: parseBooleanFilter(search.get("overdue"), "overdue"),
-        from: search.get("from") ?? undefined,
-        to: search.get("to") ?? undefined,
+        from: parseDateTimeFilter(search.get("from"), "from"),
+        to: parseDateTimeFilter(search.get("to"), "to"),
         cursor: parseCursor(search.get("cursor")),
         limit: parseLimit(search.get("limit"))
       });
@@ -277,14 +333,14 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       const parsed = createRequestSchema.safeParse(await jsonBody(request));
       if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "Os dados da solicitação são inválidos.", 400);
       const body = parsed.data;
-      const result = await service.createRequest(actor, body, { ...commandMeta(request, body), allowDuplicateOverride: request.headers.get("x-duplicate-override") === "true" });
+      const result = await service.createRequest(actor, body, { ...commandMeta(request, body, operation), allowDuplicateOverride: request.headers.get("x-duplicate-override") === "true" });
       return responseFor(result, correlationId, id, 201);
     }
     if (path[0] === "diagnostic-requests" && path.length === 2 && method === "GET") return responseFor(await service.getRequest(actor, path[1]), correlationId, id);
     if (path[0] === "diagnostic-requests" && path.length === 3 && path[2] === "cancel" && method === "POST") {
       const body = await objectBody(request);
       const input = parseCommandBody(body, cancelSchema, "Os dados de cancelamento são inválidos.");
-      return responseFor(await service.cancelRequest(actor, path[1], { ...input, ...commandMeta(request, body) }), correlationId, id);
+      return responseFor(await service.cancelRequest(actor, path[1], { ...input, ...commandMeta(request, body, operation) }), correlationId, id);
     }
 
     if (path[0] === "diagnostic-items" && path.length === 2 && method === "GET") return responseFor(await service.getItem(actor, path[1]), correlationId, id);
@@ -293,7 +349,7 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       const action = path[2];
       if (method !== "POST") throw new ApiError("NOT_FOUND", "Rota não encontrada.", 404);
       const body = await objectBody(request);
-      const meta = commandMeta(request, body);
+      const meta = commandMeta(request, body, operation);
       if (action === "receive-sample") {
         const input = parseCommandBody(body, sampleSchema, "Os dados da amostra são inválidos.");
         return responseFor(await service.receiveSample(actor, [itemId], { ...input, ...meta }), correlationId, id);
@@ -328,7 +384,7 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       }
       if (action === "request-recollection") {
         const input = parseCommandBody(body, recollectionSchema, "Os dados de recoleta são inválidos.");
-        const item = store.getState().items.find((entry) => entry.id === itemId);
+        const item = (await store.readState()).items.find((entry) => entry.id === itemId);
         if (!item?.currentSampleId) throw new ApiError("INVALID_STATE_TRANSITION", "Este item não possui amostra recebida para recoleta.", 409);
         return responseFor(await service.requestRecollection(actor, item.currentSampleId, { ...input, ...meta }), correlationId, id);
       }
@@ -341,27 +397,30 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
     if (path[0] === "samples" && path.length === 3 && path[2] === "receive-replacement" && method === "POST") {
       const body = await objectBody(request);
       const input = parseCommandBody(body, sampleSchema, "Os dados da amostra substituta são inválidos.");
-      return responseFor(await service.receiveReplacement(actor, path[1], { ...input, ...commandMeta(request, body) }), correlationId, id);
+      return responseFor(await service.receiveReplacement(actor, path[1], { ...input, ...commandMeta(request, body, operation) }), correlationId, id);
     }
     if (path[0] === "procedures" && path.length === 3 && path[2] === "reschedule" && method === "POST") {
       const body = await objectBody(request);
       const input = parseCommandBody(body, scheduleSchema, "Os dados de remarcação são inválidos.");
-      return responseFor(await service.rescheduleProcedure(actor, path[1], { ...input, ...commandMeta(request, body) }), correlationId, id);
+      return responseFor(await service.rescheduleProcedure(actor, path[1], { ...input, ...commandMeta(request, body, operation) }), correlationId, id);
     }
     if (path[0] === "result-versions" && path.length === 4 && path[2] === "attachments" && path[3] === "upload-session" && method === "POST") {
       const body = await objectBody(request);
       const input = parseCommandBody(body, attachmentUploadSchema, "Os dados do anexo são inválidos.");
-      return responseFor(await service.createAttachmentUploadSession(actor, path[1], { ...input, ...commandMeta(request, body) }), correlationId, id, 201);
+      return responseFor(await service.createAttachmentUploadSession(actor, path[1], { ...input, ...commandMeta(request, body, operation) }), correlationId, id, 201);
     }
     if (path[0] === "attachments" && path.length === 3 && path[2] === "content" && method === "PUT") {
+      const mediaType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+      if (mediaType !== "application/octet-stream") throw new ApiError("UNSUPPORTED_MEDIA_TYPE", "O tipo de conteúdo não é suportado.", 415);
       const maxAttachmentBytes = positiveInteger(process.env.ATTACHMENT_MAX_BYTES, 25 * 1024 * 1024);
-      const bytes = await readBytesWithLimit(request, maxAttachmentBytes);
+      const authorized = await service.authorizeAttachmentUpload(actor, path[1]);
+      const bytes = await readBytesWithLimit(request, Math.min(maxAttachmentBytes, authorized.sizeBytes));
       return responseFor(await service.uploadAttachment(actor, path[1], bytes), correlationId, id);
     }
     if (path[0] === "attachments" && path.length === 3 && path[2] === "finalize" && method === "POST") {
       const body = await objectBody(request);
       parseCommandBody(body, attachmentFinalizeSchema, "Os dados de finalização são inválidos.");
-      return responseFor(await service.finalizeAttachment(actor, path[1], commandMeta(request, body)), correlationId, id);
+      return responseFor(await service.finalizeAttachment(actor, path[1], commandMeta(request, body, operation)), correlationId, id);
     }
     if (path[0] === "attachments" && path.length === 3 && path[2] === "download" && method === "GET") {
       const downloaded = await service.downloadAttachment(actor, path[1]);
@@ -375,22 +434,22 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       if (path[2] === "draft" && method === "PATCH") {
         const body = await objectBody(request);
         const input = parseCommandBody(body, resultDraftSchema, "Os dados do draft são inválidos.");
-        return responseFor(await service.updateResultDraft(actor, resultId, { ...input, ...commandMeta(request, body) }), correlationId, id);
+        return responseFor(await service.updateResultDraft(actor, resultId, { ...input, ...commandMeta(request, body, operation) }), correlationId, id);
       }
       if (path[2] === "release" && method === "POST") {
         const body = await objectBody(request);
         const input = parseCommandBody(body, releaseResultSchema, "Os dados de liberação são inválidos.");
-        return responseFor(await service.releaseResult(actor, resultId, { ...input, ...commandMeta(request, body) }), correlationId, id);
+        return responseFor(await service.releaseResult(actor, resultId, { ...input, ...commandMeta(request, body, operation) }), correlationId, id);
       }
       if (path[2] === "amend" && method === "POST") {
         const body = await objectBody(request);
         const input = parseCommandBody(body, amendResultSchema, "Os dados da emenda são inválidos.");
-        return responseFor(await service.amendResult(actor, resultId, { ...input, ...commandMeta(request, body) }), correlationId, id);
+        return responseFor(await service.amendResult(actor, resultId, { ...input, ...commandMeta(request, body, operation) }), correlationId, id);
       }
       if (path[2] === "void" && method === "POST") {
         const body = await objectBody(request);
         const input = parseCommandBody(body, voidResultSchema, "Os dados de invalidação são inválidos.");
-        return responseFor(await service.voidResult(actor, resultId, { ...input, ...commandMeta(request, body) }), correlationId, id);
+        return responseFor(await service.voidResult(actor, resultId, { ...input, ...commandMeta(request, body, operation) }), correlationId, id);
       }
       if (path[2] === "view" && method === "POST") {
         const body = await objectBody(request);
@@ -398,12 +457,12 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
         const current = await service.getResult(actor, resultId);
         const versionId = input.versionId;
         if (current.version.id !== versionId) throw new ApiError("REVIEW_STALE", "A versão do resultado mudou. Atualize o contexto.", 409);
-        return responseFor(await service.viewResult(actor, versionId, commandMeta(request, body)), correlationId, id);
+        return responseFor(await service.viewResult(actor, versionId, commandMeta(request, body, operation)), correlationId, id);
       }
       if (path[2] === "review" && method === "POST") {
         const body = await objectBody(request);
         const input = parseCommandBody(body, reviewResultSchema, "Os dados de revisão são inválidos.");
-        return responseFor(await service.reviewResult(actor, resultId, { ...input, ...commandMeta(request, body) }), correlationId, id);
+        return responseFor(await service.reviewResult(actor, resultId, { ...input, ...commandMeta(request, body, operation) }), correlationId, id);
       }
     }
 
@@ -415,11 +474,18 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
       return responseFor(data.items, correlationId, id, 200, { nextCursor: data.nextCursor, limit: data.limit, total: data.total });
     }
 
-    if (path[0] === "notifications" && method === "GET") return responseFor(await service.listNotifications(actor, (new URL(request.url).searchParams.get("filter") as "ALL" | "UNREAD" | "ACTIONABLE" | "CRITICAL") ?? "ALL"), correlationId, id);
+    if (path[0] === "notifications" && method === "GET") {
+      const search = new URL(request.url).searchParams;
+      const data = await service.listNotifications(actor, (search.get("filter") as "ALL" | "UNREAD" | "ACTIONABLE" | "CRITICAL") ?? "ALL", {
+        cursor: parseCursor(search.get("cursor")),
+        limit: parseLimit(search.get("limit"))
+      });
+      return responseFor(data.items, correlationId, id, 200, { nextCursor: data.nextCursor, limit: data.limit, total: data.total });
+    }
     if (path[0] === "notifications" && path[2] === "acknowledge" && method === "POST") {
       const body = await objectBody(request);
       const parsed = parseCommandBody(body, acknowledgeNotificationSchema, "Os dados de confirmação são inválidos.");
-      return responseFor(await service.acknowledgeNotification(actor, path[1], { ...parsed, ...commandMeta(request, body) }), correlationId, id);
+      return responseFor(await service.acknowledgeNotification(actor, path[1], { ...parsed, ...commandMeta(request, body, operation) }), correlationId, id);
     }
     if (path[0] === "queues" && path[2] === "items" && method === "GET") {
       const search = new URL(request.url).searchParams;
@@ -429,12 +495,14 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
     }
     if (path[0] === "search" && method === "GET") {
       const search = new URL(request.url).searchParams;
-      const data = await service.search(actor, search.get("q") ?? "", {
+      const query = search.get("q") ?? "";
+      if (codePointLength(query) > 200) throw new ApiError("VALIDATION_ERROR", "O termo de busca é muito longo.", 400);
+      const data = await service.search(actor, query, {
         types: parseSearchTypes(search.get("types")),
         status: parseItemState(search.get("status")),
         departmentCode: search.get("department") ?? search.get("departmentCode") ?? undefined,
-        from: search.get("from") ?? undefined,
-        to: search.get("to") ?? undefined,
+        from: parseDateTimeFilter(search.get("from"), "from"),
+        to: parseDateTimeFilter(search.get("to"), "to"),
         cursor: parseCursor(search.get("cursor")),
         limit: parseLimit(search.get("limit"))
       });
@@ -449,7 +517,8 @@ async function dispatchInner(method: string, request: Request, context: RouteCon
     if (path[0] === "management" && path[1] === "overview" && method === "GET") return responseFor(await service.managementOverview(actor), correlationId, id);
     if (path[0] === "realtime" && path[1] === "events" && method === "GET") {
       if (!canAccessResource(actor, "realtime.connect", {})) throw new ApiError("SCOPE_DENIED", "Você não tem acesso ao canal em tempo real.", 404);
-      return realtimeResponse(store, actor, correlationId, request.headers.get("last-event-id") ?? undefined, new URL(request.url).searchParams.get("snapshot") === "true", request);
+      const snapshot = parseBooleanFilter(new URL(request.url).searchParams.get("snapshot"), "snapshot") ?? false;
+      return await realtimeResponse(store, actor, correlationId, request.headers.get("last-event-id") ?? undefined, snapshot, request);
     }
 
     throw new ApiError("NOT_FOUND", "Rota não encontrada.", 404);
@@ -498,10 +567,26 @@ function parseBooleanFilter(value: string | null, field: string): boolean | unde
   throw new ApiError("VALIDATION_ERROR", `O filtro ${field} é inválido.`, 400);
 }
 
+function parseServiceIdentifier(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const parsed = serviceIdentifierSchema.safeParse(value);
+  if (!parsed.success) throw new ApiError("VALIDATION_ERROR", "O serviço informado é inválido.", 400);
+  return parsed.data;
+}
+
+function parseDateTimeFilter(value: string | null, field: string): string | undefined {
+  if (value === null) return undefined;
+  const parsed = queryDateTimeSchema.safeParse(value);
+  if (!parsed.success) throw new ApiError("VALIDATION_ERROR", `O filtro ${field} é inválido.`, 400);
+  return parsed.data;
+}
+
 function parseSearchTypes(value: string | null): SearchResultType[] | undefined {
   if (value === null) return undefined;
-  const types = value.split(",").map((entry) => entry.trim()).filter(Boolean);
-  if (!types.length || types.some((type) => type !== "REQUEST" && type !== "ITEM")) throw new ApiError("VALIDATION_ERROR", "O tipo de busca é inválido.", 400);
+  if (!/^(REQUEST|ITEM)(\s*,\s*(REQUEST|ITEM))*$/.test(value)) {
+    throw new ApiError("VALIDATION_ERROR", "O tipo de busca é inválido.", 400);
+  }
+  const types = value.split(",").map((entry) => entry.trim());
   return [...new Set(types)] as SearchResultType[];
 }
 
@@ -511,26 +596,33 @@ function parseCursor(value: string | null): string | undefined {
   return value;
 }
 
-function realtimeResponse(store: Awaited<ReturnType<typeof getRuntimeStoreAsync>>, actor: User, correlationId: string, lastEventId: string | undefined, snapshot: boolean, request: Request): Response {
-  const state = store.getState();
-  const boundedEvents = state.outbox.slice(-20);
-  const lastIndex = lastEventId ? boundedEvents.findIndex((message) => message.id === lastEventId) : -1;
-  const replayExpired = Boolean(lastEventId) && lastIndex < 0;
-  const replayWindow = lastEventId && !replayExpired ? boundedEvents.slice(lastIndex + 1) : boundedEvents;
-  const events = replayWindow.filter((message) => eventVisible(state, actor, message.aggregateType, message.aggregateId, message.payload)).map((message) => ({ eventId: message.id, type: message.eventType, occurredAt: message.availableAt, entityType: message.aggregateType, entityId: message.aggregateId, correlationId: message.correlationId }));
-  const resync = replayExpired ? `event: resync_required\ndata: ${JSON.stringify({ reason: "event_window_expired" })}\n\n` : "";
-  const payload = `${resync}${events.map((event) => `id: ${event.eventId}\nevent: diagnostic.updated\ndata: ${JSON.stringify(event)}\n\n`).join("")}`;
+async function realtimeResponse(store: Awaited<ReturnType<typeof getRuntimeStoreAsync>>, actor: User, correlationId: string, lastEventId: string | undefined, snapshot: boolean, request: Request): Promise<Response> {
   const headers = { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-correlation-id": correlationId };
-  if (snapshot) return new Response(`retry: 5000\n\n${payload || ": heartbeat\n\n"}`, { headers });
+  if (snapshot) {
+    const state = await store.readState();
+    if (!authorizationSnapshotIsCurrent(state, actor)) throw new ApiError("SESSION_EXPIRED", "Sessão expirada. Entre novamente.", 401);
+    const boundedEvents = state.outbox.slice(-20);
+    const lastIndex = lastEventId ? boundedEvents.findIndex((message) => message.id === lastEventId) : -1;
+    const replayExpired = Boolean(lastEventId) && lastIndex < 0;
+    const replayWindow = lastEventId && !replayExpired ? boundedEvents.slice(lastIndex + 1) : boundedEvents;
+    const events = replayWindow.filter((message) => eventVisible(state, actor, message.aggregateType, message.aggregateId, message.payload)).map((message) => ({ eventId: message.id, type: message.eventType, occurredAt: message.availableAt, entityType: message.aggregateType, entityId: message.aggregateId, correlationId: message.correlationId }));
+    const resync = replayExpired ? `event: resync_required\ndata: ${JSON.stringify({ reason: "event_window_expired" })}\n\n` : "";
+    const payload = `${resync}${events.map((event) => `id: ${event.eventId}\nevent: diagnostic.updated\ndata: ${JSON.stringify(event)}\n\n`).join("")}`;
+    const authorizationState = await store.readState();
+    if (!authorizationSnapshotIsCurrent(authorizationState, actor)) throw new ApiError("SESSION_EXPIRED", "Sessão expirada. Entre novamente.", 401);
+    return new Response(`retry: 5000\n\n${payload || ": heartbeat\n\n"}`, { headers });
+  }
   let timer: ReturnType<typeof setInterval> | undefined;
   let expirationTimer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
   let metricRegistered = false;
+  let pollInFlight = false;
   const maxStreamMs = positiveInteger(process.env.REALTIME_STREAM_MAX_MS, 0);
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const encoder = new TextEncoder();
       let cursor = lastEventId;
+      let preamblePending = true;
       incrementGauge("sse_connections");
       metricRegistered = true;
       const cleanup = () => {
@@ -547,26 +639,40 @@ function realtimeResponse(store: Awaited<ReturnType<typeof getRuntimeStoreAsync>
         cleanup();
         controller.close();
       };
-      const send = () => {
-        if (closed) return;
-        const current = store.getState();
-        if (!authorizationSnapshotIsCurrent(current, actor)) {
+      const send = async () => {
+        if (closed || pollInFlight) return;
+        pollInFlight = true;
+        try {
+          const current = await store.readState();
+          if (closed) return;
+          if (!authorizationSnapshotIsCurrent(current, actor)) {
+            closeStream();
+            return;
+          }
+          const messages = current.outbox.slice(-20);
+          const cursorIndex = cursor ? messages.findIndex((message) => message.id === cursor) : -1;
+          const expired = Boolean(cursor) && cursorIndex < 0;
+          const replay = cursor && !expired ? messages.slice(cursorIndex + 1) : messages;
+          const visible = replay.filter((message) => eventVisible(current, actor, message.aggregateType, message.aggregateId, message.payload));
+          const nextPayload = `${preamblePending ? "retry: 5000\n\n" : ""}${expired ? `event: resync_required\ndata: ${JSON.stringify({ reason: "event_window_expired" })}\n\n` : ""}${visible.map((message) => {
+            cursor = message.id;
+            return `id: ${message.id}\nevent: diagnostic.updated\ndata: ${JSON.stringify({ eventId: message.id, type: message.eventType, occurredAt: message.availableAt, entityType: message.aggregateType, entityId: message.aggregateId, correlationId: message.correlationId })}\n\n`;
+          }).join("") || ": heartbeat\n\n"}`;
+          const authorizationState = await store.readState();
+          if (closed || !authorizationSnapshotIsCurrent(authorizationState, actor)) {
+            closeStream();
+            return;
+          }
+          preamblePending = false;
+          controller.enqueue(encoder.encode(nextPayload));
+        } catch {
           closeStream();
-          return;
+        } finally {
+          pollInFlight = false;
         }
-        const messages = current.outbox.slice(-20);
-        const cursorIndex = cursor ? messages.findIndex((message) => message.id === cursor) : -1;
-        const expired = Boolean(cursor) && cursorIndex < 0;
-        const replay = cursor && !expired ? messages.slice(cursorIndex + 1) : messages;
-        const visible = replay.filter((message) => eventVisible(current, actor, message.aggregateType, message.aggregateId, message.payload));
-        const nextPayload = `${expired ? `event: resync_required\ndata: ${JSON.stringify({ reason: "event_window_expired" })}\n\n` : ""}${visible.map((message) => {
-          cursor = message.id;
-          return `id: ${message.id}\nevent: diagnostic.updated\ndata: ${JSON.stringify({ eventId: message.id, type: message.eventType, occurredAt: message.availableAt, entityType: message.aggregateType, entityId: message.aggregateId, correlationId: message.correlationId })}\n\n`;
-        }).join("") || ": heartbeat\n\n"}`;
-        controller.enqueue(encoder.encode(nextPayload));
       };
-      controller.enqueue(encoder.encode(`retry: 5000\n\n${payload || ": heartbeat\n\n"}`));
-      timer = setInterval(send, positiveInteger(process.env.REALTIME_STREAM_INTERVAL_MS, 5_000));
+      void send();
+      timer = setInterval(() => void send(), positiveInteger(process.env.REALTIME_STREAM_INTERVAL_MS, 5_000));
       if (maxStreamMs > 0) expirationTimer = setTimeout(closeStream, maxStreamMs);
       request.signal.addEventListener("abort", () => {
         closeStream();
@@ -586,13 +692,7 @@ function realtimeResponse(store: Awaited<ReturnType<typeof getRuntimeStoreAsync>
   return new Response(stream, { headers });
 }
 
-function authorizationSnapshotIsCurrent(state: ReturnType<Awaited<ReturnType<typeof getRuntimeStoreAsync>>["getState"]>, actor: User): boolean {
-  const current = state.users.find((user) => user.id === actor.id);
-  const session = actor.sessionId ? state.sessions.find((entry) => entry.id === actor.sessionId) : undefined;
-  return Boolean(current?.active && current.version === actor.version && current.role === actor.role && current.departmentCode === actor.departmentCode && session && !session.revokedAt && new Date(session.expiresAt).getTime() > Date.now());
-}
-
-function eventVisible(state: ReturnType<Awaited<ReturnType<typeof getRuntimeStoreAsync>>["getState"]>, actor: User, entityType: string, entityId: string, payload: Record<string, unknown>): boolean {
+function eventVisible(state: StoreState, actor: User, entityType: string, entityId: string, payload: Record<string, unknown>): boolean {
   let patientId: string | undefined;
   let departmentCode: string | undefined;
   if (entityType === "DiagnosticRequest") {

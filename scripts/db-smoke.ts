@@ -1,15 +1,45 @@
+import { randomBytes } from "node:crypto";
 import { PostgresStore } from "../src/server/store/postgres-store";
 import { createDemoState } from "../src/server/store/fixtures";
 import { createApplicationService } from "../src/server/application/service";
 import { InProcessEventBus, processOutboxBatch } from "../src/server/operations/outbox";
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) throw new Error("DATABASE_URL é obrigatório para o smoke test.");
+function databaseUrlForDestructiveSmoke(): string {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) throw new Error("DATABASE_URL é obrigatório para o smoke test.");
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("O smoke test destrutivo de banco de dados é proibido em produção.");
+  }
+  if (process.env.ALLOW_DB_SMOKE_RESET !== "true") {
+    throw new Error("Defina ALLOW_DB_SMOKE_RESET=true para autorizar explicitamente o reset do banco de smoke.");
+  }
+
+  const parsed = new URL(connectionString);
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol)) {
+    throw new Error("DATABASE_URL deve usar o protocolo PostgreSQL.");
+  }
+  const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+  if (!loopbackHosts.has(parsed.hostname)) {
+    throw new Error("O smoke test destrutivo aceita somente um banco local em loopback.");
+  }
+  const databaseName = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  if (!/^cvg_(?:smoke|test)(?:[a-z0-9_-]*)$/i.test(databaseName)) {
+    throw new Error("O banco destrutivo deve ter nome dedicado iniciado por cvg_smoke ou cvg_test.");
+  }
+  return connectionString;
+}
+
 async function main(databaseUrl: string): Promise<void> {
-  const first = await PostgresStore.create(databaseUrl, createDemoState());
+  const smokePassword = randomBytes(32).toString("base64url");
+  const fixture = createDemoState(smokePassword);
+  const first = await PostgresStore.create(
+    databaseUrl,
+    fixture,
+    { authorization: "ALLOW_DB_SMOKE_RESET" }
+  );
   let requestId = "";
   try {
-    await first.reset(createDemoState("db-smoke-password"));
+    await first.reset(fixture, { authorization: "ALLOW_DB_SMOKE_RESET" });
     const service = createApplicationService(first);
     const actor = first.getState().users.find((user) => user.email === "vet@cvg.local");
     if (!actor) throw new Error("Fixture actor ausente.");
@@ -18,7 +48,7 @@ async function main(databaseUrl: string): Promise<void> {
   } finally {
     await first.close();
   }
-  const second = await PostgresStore.create(databaseUrl, createDemoState());
+  const second = await PostgresStore.create(databaseUrl);
   try {
     if (!second.getState().requests.some((request) => request.id === requestId)) throw new Error("Estado não persistiu após reabrir a conexão.");
     if (!second.getState().auditEvents.some((event) => event.entityId === requestId)) throw new Error("Auditoria não foi projetada no PostgreSQL.");
@@ -31,4 +61,4 @@ async function main(databaseUrl: string): Promise<void> {
   }
 }
 
-void main(connectionString).catch((error: unknown) => { console.error(error); process.exitCode = 1; });
+void main(databaseUrlForDestructiveSmoke()).catch((error: unknown) => { console.error(error); process.exitCode = 1; });

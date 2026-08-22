@@ -1,5 +1,9 @@
 # Backlog de execução 95/100
 
+> **Historical backlog — superseded on 2026-08-22.** The legacy `DONE` and
+> `CONDITIONAL` states do not satisfy Quality Bar v4. The active dependency graph is
+> [`.agent/backlog.json`](../../.agent/backlog.json).
+
 **Status inicial:** planejado em 20/08/2026; status atual registrado na coluna `Estado`.  
 **Fonte:** [`QUALITY_SCORECARD_95.md`](QUALITY_SCORECARD_95.md) e [`ROADMAP_95.md`](ROADMAP_95.md).  
 **Regra:** `DONE` significa implementado e verificado localmente; `CONDITIONAL` significa tecnicamente pronto, mas dependente de ambiente externo; `BLOCKED` significa que implementar a decisão sem owner seria inseguro.

@@ -9,6 +9,7 @@ export { safeStorageKey } from "./storage-key";
 export interface FileStore {
   put(key: string, content: Uint8Array): Promise<void>;
   get(key: string): Promise<Buffer>;
+  delete?(key: string): Promise<void>;
   remove(key: string): Promise<void>;
   exists(key: string): Promise<boolean>;
   healthcheck?(): Promise<void>;
@@ -33,6 +34,10 @@ export class LocalFileStore implements FileStore {
 
   async remove(key: string): Promise<void> {
     await rm(path.resolve(this.root, safeStorageKey(key)), { force: true });
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.remove(key);
   }
 
   async exists(key: string): Promise<boolean> {

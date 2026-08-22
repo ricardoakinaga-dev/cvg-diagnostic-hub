@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "project": "CVG Diagnostics Hub",
+  "goal": "Implement every locally authorized plan needed for a premium enterprise MVP and prove it against Quality Bar v4",
+  "project_profile": "BROWNFIELD",
+  "work_mode": "FEATURE",
+  "work_mode_overlays": ["REFACTOR", "MIGRATION"],
+  "lifecycle_stage": "BUILD",
+  "active_activity": "IMPLEMENT",
+  "engineering_tier": "T3_SYSTEM",
+  "risk_level": "HIGH",
+  "blast_radius": "SYSTEM",
+  "status": "IN_PROGRESS",
+  "active_execplan": ".agent/plans/premium-enterprise-mvp-v4.md",
+  "active_task": "TASK-V4-DATA-001",
+  "verification_state": "FAIL",
+  "repository_state": "Git main at 7728140, initially clean against origin/main; v4 control-plane changes in progress",
+  "instruction_scope_refs": ["AGENTS.md", "docs/build/PREMIUM_MVP_V4.md"],
+  "last_gate_record": ".agent/gates/implementation-ready-v4-data.json",
+  "last_event_id": "EVT-V4-019",
+  "state_revision": 13,
+  "next_gate": "VERIFIED",
+  "next_action": "Create the fail-closed disposable PostgreSQL harness and execute two-store stale-read RED regressions before changing store production behavior",
+  "blocked_by": [],
+  "human_approval_required": [
+    "Hospital release decisions listed in docs/build/PREMIUM_MVP_V4.md remain external and do not block local implementation"
+  ],
+  "updated_at": "2026-08-22T05:27:54Z"
+}

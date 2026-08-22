@@ -61,7 +61,7 @@ export function WorkflowAction({ item, onComplete }: { item: WorkflowActionItem;
   const [startsAt, setStartsAt] = useState("");
   const [endsAt, setEndsAt] = useState("");
   const [resource, setResource] = useState("");
-  const [draftId, setDraftId] = useState<string>();
+  const [draft, setDraft] = useState<{ id: string; version: number }>();
 
   if (!action) return <span className="next-action">Sem ação disponível</span>;
   if (action === "REVIEW_RESULT" && item.currentResultId) {
@@ -96,8 +96,8 @@ export function WorkflowAction({ item, onComplete }: { item: WorkflowActionItem;
       } else if (action === "SCHEDULE") {
         await apiFetch(`/diagnostic-items/${item.id}/schedule`, { method: "POST", body: JSON.stringify({ startsAt, endsAt, resource: resource.trim(), expectedVersion: item.version }) });
       } else if (action === "CREATE_RESULT") {
-        const result = await apiFetch<{ result: { id: string } }>(`/diagnostic-items/${item.id}/results`, { method: "POST", body: JSON.stringify({ narrative: narrative.trim(), content: {}, expectedVersion: item.version }) });
-        setDraftId(result.result.id);
+        const result = await apiFetch<{ result: { id: string; version: number } }>(`/diagnostic-items/${item.id}/results`, { method: "POST", body: JSON.stringify({ narrative: narrative.trim(), content: {}, expectedVersion: item.version }) });
+        setDraft(result.result);
         setNotice("Draft salvo. Confirme a liberação quando estiver pronto.");
         return;
       } else if (action === "START_PROCESSING") {
@@ -117,12 +117,12 @@ export function WorkflowAction({ item, onComplete }: { item: WorkflowActionItem;
   }
 
   async function releaseDraft() {
-    if (!draftId || busy) return;
+    if (!draft || busy) return;
     setBusy(true);
     setError("");
     try {
-      await apiFetch(`/results/${draftId}/release`, { method: "POST", body: JSON.stringify({}) });
-      setDraftId(undefined);
+      await apiFetch(`/results/${draft.id}/release`, { method: "POST", body: JSON.stringify({ expectedVersion: draft.version }) });
+      setDraft(undefined);
       setNotice("");
       setOpen(false);
       onComplete?.();
@@ -152,7 +152,7 @@ export function WorkflowAction({ item, onComplete }: { item: WorkflowActionItem;
         {error && <p className="form-alert" role="alert">{error}</p>}
         {notice && <p className="form-notice" role="status">{notice}</p>}
         <div className="workflow-form-actions"><button className="button button-ghost" type="button" onClick={() => setOpen(false)}>Cancelar</button><button className="button button-primary" type="submit" disabled={busy}>{busy ? "Confirmando…" : "Confirmar"}</button></div>
-        {draftId && <button className="button button-primary" type="button" onClick={() => void releaseDraft()} disabled={busy}>Liberar resultado</button>}
+        {draft && <button className="button button-primary" type="button" onClick={() => void releaseDraft()} disabled={busy}>Liberar resultado</button>}
       </form>}
     </div>
   );

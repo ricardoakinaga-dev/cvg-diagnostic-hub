@@ -13,4 +13,4 @@ if [[ ! -f "$restore_file" ]]; then
   exit 1
 fi
 pg_restore --clean --if-exists --no-owner --dbname "$DATABASE_URL" "$restore_file"
-echo "Backup restaurado. Execute npm run db:migrate e npm run db:smoke para verificar o estado."
+echo "Backup restaurado. Execute npm run db:migrate; use db:smoke somente em um banco local dedicado cvg_smoke/cvg_test com opt-in explícito."

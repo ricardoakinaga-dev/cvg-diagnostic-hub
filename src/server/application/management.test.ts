@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createApplicationService } from "./service";
 import { createDemoState } from "../store/fixtures";
 import { MemoryStore } from "../store/memory-store";
-import { loginUser } from "../security/session";
+import { loginUser, reauthenticateUser, revokeSession } from "../security/session";
 
 function setup() {
   const store = new MemoryStore(createDemoState("management-test-password"));
@@ -16,6 +16,81 @@ function setup() {
 }
 
 describe("management control center", () => {
+  it("fingerprints provisioned passwords confidentially and rejects a changed password on retry", async () => {
+    const first = setup();
+    const second = setup();
+    const baseInput = {
+      email: "fingerprint.password@cvg.local",
+      displayName: "Senha fora do fingerprint",
+      role: "LAB_TECH" as const,
+      departmentCode: "LABORATORY",
+      timezone: "America/Sao_Paulo",
+      reason: "Validar proteção do segredo",
+      confirm: true as const,
+      idempotencyKey: "password-fingerprint"
+    };
+
+    await first.service.createManagedUser({ ...first.admin, reauthenticatedAt: new Date().toISOString() }, {
+      ...baseInput,
+      password: "first-secure-password-123"
+    });
+    await second.service.createManagedUser({ ...second.admin, reauthenticatedAt: new Date().toISOString() }, {
+      ...baseInput,
+      password: "second-secure-password-456"
+    });
+
+    const firstFingerprint = first.store.getState().idempotency.find((record) => record.key === baseInput.idempotencyKey)?.payloadHash;
+    const secondFingerprint = second.store.getState().idempotency.find((record) => record.key === baseInput.idempotencyKey)?.payloadHash;
+    expect(firstFingerprint).toEqual(expect.any(String));
+    expect(secondFingerprint).toEqual(expect.any(String));
+    expect(secondFingerprint).not.toBe(firstFingerprint);
+    await expect(first.service.createManagedUser({ ...first.admin, reauthenticatedAt: new Date().toISOString() }, {
+      ...baseInput,
+      password: "second-secure-password-456"
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED", status: 409 });
+  });
+
+  it("rejects privileged changes when the authenticated step-up session was revoked", async () => {
+    const { store, service } = setup();
+    const login = await loginUser(store, "admin@cvg.local", "management-test-password");
+    const request = new Request("http://localhost/api/v1/session/reauth", {
+      headers: { cookie: `cvg_session=${login.sessionToken}` }
+    });
+    const actor = await reauthenticateUser(store, request, "management-test-password");
+    await revokeSession(store, login.sessionToken);
+
+    await expect(service.createManagedUser(actor, {
+      email: "revoked.stepup@cvg.local",
+      displayName: "Sessão revogada",
+      password: "revoked-session-password-123",
+      role: "LAB_TECH",
+      departmentCode: "LABORATORY",
+      timezone: "America/Sao_Paulo",
+      reason: "Validar revogação transacional",
+      confirm: true,
+      idempotencyKey: "revoked-stepup-create"
+    })).rejects.toMatchObject({ code: "UNAUTHENTICATED", status: 401 });
+  });
+
+  it("treats provisioned passwords as opaque values without trimming", async () => {
+    const { service, store, admin } = setup();
+    const password = " secure-password-123 ";
+    const created = await service.createManagedUser({ ...admin, reauthenticatedAt: new Date().toISOString() }, {
+      email: "opaque.password@cvg.local",
+      displayName: "Senha opaca",
+      password,
+      role: "LAB_TECH",
+      departmentCode: "LABORATORY",
+      timezone: "America/Sao_Paulo",
+      reason: "Validar credencial literal",
+      confirm: true,
+      idempotencyKey: "opaque-password-user"
+    });
+
+    await expect(loginUser(store, created.email, password)).resolves.toBeTruthy();
+    await expect(loginUser(store, created.email, password.trim())).rejects.toMatchObject({ code: "UNAUTHENTICATED" });
+  });
+
   it("lets a delegated manager create and deactivate an operational collaborator", async () => {
     const { store, service, manager } = setup();
     const reauthenticatedManager = { ...manager, reauthenticatedAt: new Date().toISOString() };

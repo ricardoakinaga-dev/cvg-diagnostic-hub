@@ -10,9 +10,23 @@ declare global {
   var __cvgDiagnosticsFileStore: FileStore | undefined;
 }
 
+type RuntimeDataMode = "memory" | "postgres";
+
+function runtimeDataMode(): RuntimeDataMode {
+  const configured = process.env.APP_DATA_MODE;
+  if (configured !== "memory" && configured !== "postgres") {
+    throw new Error("APP_DATA_MODE deve ser configurado explicitamente como memory ou postgres.");
+  }
+  if (configured === "memory" && process.env.NODE_ENV === "production") {
+    throw new Error("APP_DATA_MODE=memory não é permitido em produção.");
+  }
+  return configured;
+}
+
 export function getRuntimeStore(): StateStore {
+  const dataMode = runtimeDataMode();
   if (!globalThis.__cvgDiagnosticsStore) {
-    if (process.env.APP_DATA_MODE === "postgres") {
+    if (dataMode === "postgres") {
       throw new Error("APP_DATA_MODE=postgres exige getRuntimeStoreAsync para inicializar a conexão.");
     }
     globalThis.__cvgDiagnosticsStore = new MemoryStore(createDemoState());
@@ -21,13 +35,19 @@ export function getRuntimeStore(): StateStore {
 }
 
 export async function getRuntimeStoreAsync(): Promise<StateStore> {
-  if (process.env.APP_DATA_MODE !== "postgres") return getRuntimeStore();
+  const dataMode = runtimeDataMode();
+  if (dataMode !== "postgres") return getRuntimeStore();
   if (!globalThis.__cvgDiagnosticsStorePromise) {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) throw new Error("DATABASE_URL é obrigatório quando APP_DATA_MODE=postgres.");
-    globalThis.__cvgDiagnosticsStorePromise = PostgresStore.create(connectionString, createDemoState());
+    globalThis.__cvgDiagnosticsStorePromise = PostgresStore.create(connectionString);
   }
-  globalThis.__cvgDiagnosticsStore = await globalThis.__cvgDiagnosticsStorePromise;
+  try {
+    globalThis.__cvgDiagnosticsStore = await globalThis.__cvgDiagnosticsStorePromise;
+  } catch (error) {
+    globalThis.__cvgDiagnosticsStorePromise = undefined;
+    throw error;
+  }
   return globalThis.__cvgDiagnosticsStore;
 }
 
@@ -37,14 +57,16 @@ export function getRuntimeFileStore(): FileStore {
 }
 
 export async function getRuntimeReadiness(): Promise<{ dataMode: string; storageMode: string }> {
+  const dataMode = runtimeDataMode();
   const store = await getRuntimeStoreAsync();
   await store.healthcheck?.();
   const storage = getRuntimeFileStore();
   await storage.healthcheck?.();
-  return { dataMode: process.env.APP_DATA_MODE ?? "memory", storageMode: process.env.STORAGE_MODE ?? "local" };
+  return { dataMode, storageMode: process.env.STORAGE_MODE ?? "local" };
 }
 
 export function resetRuntimeStore(): void {
+  if (process.env.NODE_ENV !== "test") throw new Error("resetRuntimeStore só pode ser usado em testes.");
   globalThis.__cvgDiagnosticsStore = new MemoryStore(createDemoState());
   globalThis.__cvgDiagnosticsStorePromise = undefined;
   globalThis.__cvgDiagnosticsFileStore = undefined;

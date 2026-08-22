@@ -87,7 +87,7 @@ describe("diagnostic application service", () => {
     const recollection = await service.requestRecollection(labActor, received.sample.id, {
       reasonCode: "HEMOLYZED",
       note: "Amostra hemolisada",
-      expectedVersion: received.sample.version,
+      expectedVersion: received.items[0].version,
       idempotencyKey: "sample-recollect"
     });
 
@@ -95,6 +95,49 @@ describe("diagnostic application service", () => {
     expect(recollection.replacement.replacesSampleId).toBe(received.sample.id);
     expect(recollection.items.every((item) => item.status === "RECOLLECTION_REQUIRED")).toBe(true);
     expect((await service.timeline(actor, request.id)).items.some((event) => event.entityType === "Sample")).toBe(true);
+  });
+
+  it("rejects stale item versions across sample receipt and recollection", async () => {
+    const { service, actor, labActor, store } = setup();
+    const request = await service.createRequest(actor, {
+      patientId: "patient-thor",
+      encounterId: "encounter-thor",
+      priority: "ROUTINE",
+      items: [{ serviceId: "service-hemogram" }]
+    }, { idempotencyKey: "request-sample-concurrency" });
+    const item = request.items[0];
+
+    await expect(service.receiveSample(labActor, [item.id], {
+      accessionCode: "ACC-STALE-1",
+      sampleType: "EDTA",
+      expectedVersion: item.version + 1,
+      idempotencyKey: "sample-stale-receive"
+    })).rejects.toMatchObject({ code: "STALE_VERSION", status: 409 });
+    expect(store.getState().items.find((entry) => entry.id === item.id)).toMatchObject({ status: "REQUESTED", version: item.version });
+
+    const received = await service.receiveSample(labActor, [item.id], {
+      accessionCode: "ACC-FRESH-1",
+      sampleType: "EDTA",
+      expectedVersion: item.version,
+      idempotencyKey: "sample-fresh-receive"
+    });
+    await expect(service.requestRecollection(labActor, received.sample.id, {
+      reasonCode: "HEMOLYZED",
+      expectedVersion: item.version,
+      idempotencyKey: "sample-stale-recollection"
+    })).rejects.toMatchObject({ code: "STALE_VERSION", status: 409 });
+
+    const recollection = await service.requestRecollection(labActor, received.sample.id, {
+      reasonCode: "HEMOLYZED",
+      expectedVersion: received.items[0].version,
+      idempotencyKey: "sample-fresh-recollection"
+    });
+    await expect(service.receiveReplacement(labActor, recollection.replacement.id, {
+      accessionCode: "ACC-STALE-2",
+      sampleType: "EDTA",
+      expectedVersion: received.items[0].version,
+      idempotencyKey: "replacement-stale-receive"
+    })).rejects.toMatchObject({ code: "STALE_VERSION", status: 409 });
   });
 
   it("releases once, records notifications, and rejects stale review", async () => {
@@ -115,9 +158,16 @@ describe("diagnostic application service", () => {
     await service.startProcessing(labActor, item.id, { expectedVersion: 2, idempotencyKey: "start-result" });
     const draft = await service.createResultDraft(labActor, item.id, {
       narrative: "Hemograma dentro dos parâmetros.",
-      content: { hemoglobin: 12.4 },
+      content: { hemoglobin: 12.4, correlationId: "clinical-domain-a" },
+      expectedVersion: 3,
       idempotencyKey: "draft-result"
     });
+    await expect(service.createResultDraft(labActor, item.id, {
+      narrative: "Hemograma dentro dos parâmetros.",
+      content: { hemoglobin: 12.4, correlationId: "clinical-domain-b" },
+      expectedVersion: 3,
+      idempotencyKey: "draft-result"
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED", status: 409 });
     await expect(service.updateResultDraft(actor, draft.result.id, {
       narrative: "Hemograma atualizado dentro dos parâmetros.",
       content: { hemoglobin: 12.5 },
@@ -150,7 +200,11 @@ describe("diagnostic application service", () => {
     });
     expect(repeated.version.id).toBe(released.version.id);
 
-    await service.viewResult(actor, released.version.id, { idempotencyKey: "view-result" });
+    await expect(service.viewResult(actor, released.version.id, {
+      expectedVersion: released.item.version - 1,
+      idempotencyKey: "view-result-stale"
+    })).rejects.toMatchObject({ code: "STALE_VERSION", status: 409 });
+    await service.viewResult(actor, released.version.id, { expectedVersion: released.item.version, idempotencyKey: "view-result" });
     await expect(
       service.reviewResult(actor, released.result.id, {
         versionId: "different-version",

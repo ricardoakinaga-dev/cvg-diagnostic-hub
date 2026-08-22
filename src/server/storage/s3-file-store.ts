@@ -37,6 +37,10 @@ export class S3FileStore implements FileStore {
     await this.client.send(new DeleteObjectCommand({ Bucket: this.config.bucket, Key: safeStorageKey(key) }));
   }
 
+  async delete(key: string): Promise<void> {
+    await this.remove(key);
+  }
+
   async exists(key: string): Promise<boolean> {
     try {
       await this.client.send(new HeadObjectCommand({ Bucket: this.config.bucket, Key: safeStorageKey(key) }));

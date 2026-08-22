@@ -7,9 +7,10 @@ export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: false,
   workers: 1,
+  timeout: 60_000,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
-  reporter: [["list"], ["html", { outputFolder: "playwright-report" }]],
+  reporter: [["list"], ["html", { outputFolder: "playwright-report", open: "never" }]],
   use: {
     baseURL: process.env.BASE_URL ?? "http://localhost:3000",
     trace: "on-first-retry",
@@ -27,7 +28,7 @@ export default defineConfig({
     { name: "mobile", use: { ...devices["Pixel 5"] } }
   ],
   webServer: {
-    command: "APP_DATA_MODE=memory LOGIN_RATE_LIMIT=100 STORAGE_SCAN_MODE=local npm run dev",
+    command: "APP_DATA_MODE=memory DEMO_PASSWORD=e2e-local-password-2026 LOGIN_RATE_LIMIT=100 STORAGE_SCAN_MODE=local npm run dev",
     url: "http://localhost:3000",
     reuseExistingServer: !process.env.CI,
     timeout: 120000

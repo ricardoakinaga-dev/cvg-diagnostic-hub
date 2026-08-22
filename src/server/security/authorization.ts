@@ -183,8 +183,11 @@ export function canAccessResource(
     return !resource.patientId;
   }
 
-  if (resource.ownerId && resource.ownerId === actor.id) {
-    return true;
+  if (
+    permission === "result.draft.edit_own" &&
+    (!resource.ownerId || resource.ownerId !== actor.id)
+  ) {
+    return false;
   }
 
   const patientScopeApplies = ["VETERINARIAN", "INPATIENT_TEAM", "VIEWER"].includes(actor.role);
@@ -199,6 +202,15 @@ export function canAccessResource(
   ].includes(actor.role);
   if (serviceScopeApplies && resource.departmentCode && resource.departmentCode !== actor.departmentCode) {
     return false;
+  }
+
+  if (serviceScopeApplies && resource.serviceCode) {
+    const allowedServiceCodes = new Set(
+      (actor.serviceCodes ?? []).map((code) => code.trim().toUpperCase())
+    );
+    if (!allowedServiceCodes.has(resource.serviceCode.trim().toUpperCase())) {
+      return false;
+    }
   }
 
   if (

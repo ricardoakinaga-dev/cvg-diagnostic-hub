@@ -38,13 +38,20 @@ Requer Node.js 22+, Docker e npm:
 ```bash
 npm ci
 cp .env.example .env
+export DATABASE_URL=postgresql://cvg:cvg_dev@localhost:54329/cvg_diagnostics
+export DEMO_PASSWORD="$(openssl rand -base64 32)"
+export ALLOW_SYNTHETIC_SEED=true
 docker compose up -d postgres
-DATABASE_URL=postgresql://cvg:cvg_dev@localhost:54329/cvg_diagnostics npm run db:migrate
-DATABASE_URL=postgresql://cvg:cvg_dev@localhost:54329/cvg_diagnostics npm run db:seed
+npm run db:migrate
+npm run db:seed
 npm run dev
 ```
 
 Abra `http://localhost:3000`. Neste ambiente, outro dispositivo na mesma rede pode acessar `http://192.168.15.14:3000`; o host LAN está liberado apenas para a demonstração local. O ambiente de demonstração usa `APP_DATA_MODE=memory` e a senha sintética definida por `DEMO_PASSWORD`; para testar persistência, use `APP_DATA_MODE=postgres` junto com `DATABASE_URL` após a migração.
+
+Corpos JSON são aceitos somente como `application/json`, com limites anteriores ao
+parse configurados por `JSON_BODY_MAX_BYTES` e `JSON_BODY_MAX_DEPTH`. Os defaults do
+arquivo de exemplo são 1 MiB e 32 níveis; aumentos devem passar por revisão de risco.
 
 ## Gates de qualidade
 
@@ -62,7 +69,7 @@ npm run security:scan
 npm audit --audit-level=high
 ```
 
-Para evidência operacional adicional: `npm run perf:smoke` exige um servidor já iniciado; `ALLOW_DB_RESTORE_SMOKE=true npm run db:restore:smoke` restaura apenas em um banco Docker descartável.
+Para evidência operacional adicional: `PERF_PASSWORD="$DEMO_PASSWORD" npm run perf:smoke` exige um servidor já iniciado; `ALLOW_DB_RESTORE_SMOKE=true npm run db:restore:smoke` restaura apenas em um banco Docker descartável. O seed sintético é proibido com `NODE_ENV=production` e só executa com `ALLOW_SYNTHETIC_SEED=true`. O `db:smoke` também é destrutivo: exige `ALLOW_DB_SMOKE_RESET=true`, host de loopback e um banco dedicado cujo nome comece por `cvg_smoke` ou `cvg_test`. A integração descartável roda com `ALLOW_POSTGRES_INTEGRATION_TESTS=true`, `POSTGRES_TEST_ADMIN_URL` local e `npm run test:postgres`.
 
 O E2E usa o Chrome disponível no host quando o navegador Playwright empacotado não possui dependências gráficas. Os dados e arquivos locais ficam em `.data/` e não devem receber informação clínica real.
 

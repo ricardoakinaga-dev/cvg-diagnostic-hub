@@ -31,10 +31,12 @@ async function main(): Promise<void> {
 }
 
 async function login(): Promise<string> {
+  const password = process.env.PERF_PASSWORD ?? process.env.DEMO_PASSWORD;
+  if (!password) throw new Error("PERF_PASSWORD ou DEMO_PASSWORD é obrigatório para o smoke de performance.");
   const response = await fetch(`${baseUrl}/api/v1/session/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: process.env.PERF_EMAIL ?? "vet@cvg.local", password: process.env.PERF_PASSWORD ?? process.env.DEMO_PASSWORD ?? "local-demo-password" })
+    body: JSON.stringify({ email: process.env.PERF_EMAIL ?? "vet@cvg.local", password })
   });
   if (!response.ok) throw new Error(`Login de performance falhou com HTTP ${response.status}.`);
   const setCookies = typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [response.headers.get("set-cookie") ?? ""];

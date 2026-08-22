@@ -49,7 +49,7 @@ export function ResultView({ resultId }: { resultId: string }) {
 
   useEffect(() => {
     if (!data || data.version.status === "DRAFT" || viewed) return;
-    void apiFetch(`/results/${resultId}/view`, { method: "POST", body: JSON.stringify({ versionId: data.version.id }) })
+    void apiFetch(`/results/${resultId}/view`, { method: "POST", body: JSON.stringify({ versionId: data.version.id, expectedVersion: data.item.version }) })
       .then(() => setViewed(true))
       .catch((cause) => setError(getSafeErrorMessage(cause, "Não foi possível registrar a visualização.")));
   }, [data, resultId, viewed]);

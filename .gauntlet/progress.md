@@ -2,16 +2,28 @@
 
 - Goal: Elevar o CVG Diagnostics Hub do estado local atual para uma entrega local/produtiva com scorecard alvo de 95/100 por dimensão; criar plano, roadmap e backlog; implementar melhorias seguras; validar o artefato real; manter gates clínicos/operacionais explícitos.
 - Phase: DISCOVER → DEFINE_BAR → BUILD → RUN → INSPECT → CRITIQUE → FIX → RETEST
-- Current round: 10 (LAN development access hardening and final retest)
+- Current round: 12 (Quality Bar v4 recovery and critical-gap closure)
 - Active workstreams: Foundation/contracts, durable events, observability/storage/recovery, web/UX, verification/operations.
-- Frozen bar: [`docs/build/QUALITY_SCORECARD_95.md`](../docs/build/QUALITY_SCORECARD_95.md)
-- Roadmap/backlog: [`docs/build/ROADMAP_95.md`](../docs/build/ROADMAP_95.md) and [`docs/build/BACKLOG_95.md`](../docs/build/BACKLOG_95.md)
+- Frozen bar: [`docs/build/PREMIUM_MVP_V4.md`](../docs/build/PREMIUM_MVP_V4.md)
+- Roadmap/backlog: [`.agent/plans/premium-enterprise-mvp-v4.md`](../.agent/plans/premium-enterprise-mvp-v4.md) and [`.agent/backlog.json`](../.agent/backlog.json)
 - Final local verification: `npm run test:coverage` PASS (109 testes; 95.35% statements, 81.05% branches); typecheck/lint/build PASS; PostgreSQL persistence/audit/outbox smoke PASS; disposable restore PASS (`1|26|13`); Playwright 24/24 across desktop/tablet/mobile, including the LAN URL and request-detail layout; explicit accessibility suite 6/6; four-route production perf smoke 400 requests/0 errors/max p95 434.69 ms against 500 ms; OpenAPI 47 paths/docs 56 files/secret scan/audit PASS; `git diff --check` PASS.
-- Current gap: the local technical bar is complete at the documented boundary; external gates remain identity/ownership hospitalar, delegated-manager policy, transferência/alta, critical-result fallback policy, AV/object storage production, retention/RPO/RTO, representative hospital workload, manual accessibility acceptance, remote CI and pilot sign-off.
+- Current gap: the former local-complete claim was rejected. Four HIGH clinical/security defects were reproduced; OpenAPI has 51 semantic errors; Postgres and complete clinical browser journeys lack automated proof.
 - Stop rule: no score is raised without fresh evidence, and no external clinical policy is invented in code or documentation.
 
 Next largest gap:
-External evidence and named ownership. No local technical gate remains without an explicit conditional or blocked status.
+Close draft confidentiality, exact author/service authorization, fail-closed bootstrap and duplicate-result lineage with RED-first tests.
+
+## Round 12 — Quality Bar v4 recovery — 2026-08-22
+
+- Complete docs/code/test audits reject the historical 95/96 local closure.
+- `npm run validate` remains a useful baseline (119 tests and global coverage pass),
+  but it does not exercise PostgreSQL and cannot establish the required journeys.
+- Standards OpenAPI lint exits 1 with 51 errors and 47 warnings.
+- Independent security verdict is `REJECT`, with draft disclosure, cross-author/service
+  draft edits, known default ADMIN credentials and duplicate result drafts reproduced.
+- The active bar, plan, dependency graph and typed evidence now live in
+  `docs/build/PREMIUM_MVP_V4.md` and `.agent/`.
+- Release remains `NOT READY`; external gates are unchanged and are not simulated.
 
 ## Round 10 — LAN development access hardening and final retest — 2026-08-20
 

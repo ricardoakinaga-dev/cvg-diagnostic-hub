@@ -1,24 +1,541 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
+import { API_OPERATIONS } from "../src/server/http/api-operation-manifest.ts";
 
-const document = JSON.parse(await readFile(new URL("../docs/api/openapi.json", import.meta.url), "utf8"));
-const requiredPaths = ["/livez", "/readyz", "/session/login", "/diagnostic-requests", "/diagnostic-items/{itemId}", "/results/{resultId}", "/attachments/{attachmentId}/download", "/realtime/events"];
-if (document.openapi !== "3.1.0") throw new Error("OpenAPI 3.1.0 é obrigatório.");
-if (!document.info?.title || !document.info?.version) throw new Error("OpenAPI precisa de info.title e info.version.");
-for (const path of requiredPaths) {
-  if (!document.paths?.[path]) throw new Error(`OpenAPI não cobre a rota ${path}.`);
+const documentUrl = new URL("../docs/api/openapi.json", import.meta.url);
+const schemaReference = (name) => ({ $ref: `#/components/schemas/${name}` });
+const stringSchema = (minimum, maximum) => ({ type: "string", minLength: minimum, maxLength: maximum });
+const normalizedTextSchema = (minimum, maximum) => {
+  const core = minimum === 1
+    ? maximum === 1 ? "\\S" : `\\S(?:[\\s\\S]{0,${maximum - 2}}\\S)?`
+    : `\\S[\\s\\S]{${minimum - 2},${maximum - 2}}\\S`;
+  return {
+    type: "string",
+    minLength: 1,
+    pattern: `^[\\s]*${core}[\\s]*$`,
+    "x-normalization": "trim",
+    "x-normalized-min-length": minimum,
+    "x-normalized-max-length": maximum
+  };
+};
+const nonBlankStringSchema = (minimum, maximum) => ({
+  ...stringSchema(minimum, maximum),
+  pattern: "\\S"
+});
+const normalizedDepartmentCodeSchema = {
+  type: "string",
+  minLength: 1,
+  pattern: "^[\\s]*[A-Za-z0-9_-]{1,60}[\\s]*$",
+  "x-normalization": "trim and uppercase",
+  "x-normalized-max-length": 60
+};
+const normalizedCatalogCodeSchema = {
+  type: "string",
+  minLength: 2,
+  pattern: "^[\\s]*[A-Za-z][A-Za-z0-9_]{1,59}[\\s]*$",
+  "x-normalization": "trim and uppercase",
+  "x-normalized-min-length": 2,
+  "x-normalized-max-length": 60
+};
+const identifier = stringSchema(1, 100);
+const serviceIdentifier = { ...identifier, pattern: "^[A-Za-z0-9_-]+$" };
+const pathIdentifier = { ...identifier, pattern: "^[^/%]+$" };
+const strictDateTime = { type: "string", format: "date-time", minLength: 1, maxLength: 100, pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*(?:Z|[+-][0-9]{2}:[0-9]{2})$" };
+const expectedVersion = { type: "integer", minimum: 1, maximum: 999999999999999 };
+const passwordPattern = "^(?=.*[A-Za-z])(?=.*[0-9]).+$";
+const supportedAttachmentMediaTypes = ["application/pdf", "image/jpeg", "image/png"];
+const roleCodes = ["ADMIN", "MANAGER", "VETERINARIAN", "INPATIENT_TEAM", "LAB_TECH", "RADIOLOGY_TEAM", "ULTRASOUND_TEAM", "VIEWER"];
+const itemStates = ["REQUESTED", "RECEIVED", "IN_PROGRESS", "SCHEDULED", "AWAITING_REPORT", "RESULT_AVAILABLE", "REVIEWED", "COMPLETED", "CANCELLED", "REJECTED", "RECOLLECTION_REQUIRED", "FAILED", "RESULT_VOIDED"];
+
+const strictObject = (properties, required = []) => ({
+  type: "object",
+  additionalProperties: false,
+  ...(required.length ? { required } : {}),
+  properties
+});
+
+const requestSchemas = {
+  LoginRequest: strictObject({
+    email: { type: "string", format: "email", maxLength: 320 },
+    password: stringSchema(1, 200)
+  }, ["email", "password"]),
+  ReauthenticationRequest: strictObject({ password: stringSchema(1, 200) }, ["password"]),
+  ManagedUserCreate: {
+    ...strictObject({
+    email: { type: "string", format: "email", maxLength: 320 }, displayName: normalizedTextSchema(2, 160),
+    password: { ...stringSchema(12, 200), pattern: passwordPattern }, role: { type: "string", enum: roleCodes }, departmentCode: normalizedDepartmentCodeSchema,
+    managedDepartmentCodes: { type: "array", maxItems: 20, items: normalizedDepartmentCodeSchema },
+    timezone: { ...normalizedTextSchema(1, 80), "x-runtime-validation": "IANA time zone identifier validated by Intl.DateTimeFormat" },
+    reason: normalizedTextSchema(1, 500), confirm: { type: "boolean", const: true }
+    }, ["email", "displayName", "password", "role", "departmentCode", "timezone", "reason", "confirm"]),
+    "x-role-constraints": { managedDepartmentCodes: "allowed only when role is MANAGER" }
+  },
+  ManagedUserDeactivate: strictObject({ expectedVersion, reason: normalizedTextSchema(1, 500), confirm: { type: "boolean", const: true } }, ["reason", "confirm"]),
+  UserRoleUpdate: {
+    ...strictObject({
+      role: { type: "string", enum: roleCodes }, departmentCode: normalizedDepartmentCodeSchema,
+      managedDepartmentCodes: { type: "array", maxItems: 20, items: normalizedDepartmentCodeSchema }, active: { type: "boolean" },
+      expectedVersion, reason: normalizedTextSchema(1, 500), confirm: { type: "boolean", const: true }
+    }, ["role", "departmentCode", "reason", "confirm"]),
+    "x-role-constraints": { managedDepartmentCodes: "allowed only when role is MANAGER" }
+  },
+  DiagnosticServiceCreate: {
+    ...strictObject({
+    code: normalizedCatalogCodeSchema, name: normalizedTextSchema(1, 120), category: { type: "string", enum: ["LABORATORY", "IMAGING"] },
+    departmentCode: normalizedDepartmentCodeSchema, workflowType: { type: "string", enum: ["LABORATORY", "RADIOLOGY", "ULTRASOUND"] },
+    requiresSample: { type: "boolean" }, requiresSchedule: { type: "boolean" }, allowsAttachment: { type: "boolean" },
+    resultSchema: { type: "string", enum: ["NUMERIC_PANEL", "NARRATIVE"] }, slaHours: schemaReference("SlaHours")
+    }, ["code", "name", "category", "departmentCode", "workflowType", "requiresSample", "requiresSchedule", "allowsAttachment", "resultSchema", "slaHours"]),
+    oneOf: [
+      { properties: { category: { const: "LABORATORY" }, workflowType: { const: "LABORATORY" } } },
+      { properties: { category: { const: "IMAGING" }, workflowType: { enum: ["RADIOLOGY", "ULTRASOUND"] } } }
+    ],
+    "x-cross-field-constraints": [
+      "category=LABORATORY requires workflowType=LABORATORY",
+      "category=IMAGING requires workflowType=RADIOLOGY or ULTRASOUND"
+    ]
+  },
+  DiagnosticServicePatch: {
+    ...strictObject({
+    name: normalizedTextSchema(1, 120), category: { type: "string", enum: ["LABORATORY", "IMAGING"] }, departmentCode: normalizedDepartmentCodeSchema,
+    workflowType: { type: "string", enum: ["LABORATORY", "RADIOLOGY", "ULTRASOUND"] }, requiresSample: { type: "boolean" },
+    requiresSchedule: { type: "boolean" }, active: { type: "boolean" }, allowsAttachment: { type: "boolean" },
+    resultSchema: { type: "string", enum: ["NUMERIC_PANEL", "NARRATIVE"] }, slaHours: schemaReference("SlaHours"), expectedVersion
+    }),
+    allOf: [
+      {
+        if: { required: ["category", "workflowType"], properties: { category: { const: "LABORATORY" }, workflowType: {} } },
+        then: { properties: { workflowType: { const: "LABORATORY" } } }
+      },
+      {
+        if: { required: ["category", "workflowType"], properties: { category: { const: "IMAGING" }, workflowType: {} } },
+        then: { properties: { workflowType: { enum: ["RADIOLOGY", "ULTRASOUND"] } } }
+      }
+    ],
+    "x-cross-field-constraints": [
+      "when category and workflowType are both supplied, LABORATORY requires LABORATORY and IMAGING requires RADIOLOGY or ULTRASOUND",
+      "when only one field is supplied, compatibility is evaluated against the persisted counterpart"
+    ]
+  },
+  ReasonCodeCreate: strictObject({ type: { type: "string", enum: ["RECOLLECTION", "CANCEL", "REJECT", "AMEND"] }, code: normalizedCatalogCodeSchema, label: normalizedTextSchema(1, 160) }, ["type", "code", "label"]),
+  ReasonCodePatch: strictObject({ label: normalizedTextSchema(1, 160), active: { type: "boolean" }, expectedVersion }),
+  DiagnosticRequestCreate: strictObject({
+    patientId: identifier, encounterId: identifier, admissionId: identifier,
+    priority: { type: "string", enum: ["ROUTINE", "URGENT", "EMERGENCY"] },
+    items: { type: "array", minItems: 1, maxItems: 20, items: strictObject({ serviceId: identifier, note: normalizedTextSchema(1, 2000) }, ["serviceId"]) },
+    overrideReason: normalizedTextSchema(1, 500)
+  }, ["patientId", "encounterId", "priority", "items"]),
+  VersionCommand: strictObject({ expectedVersion }),
+  CancelCommand: strictObject({ reasonCode: normalizedTextSchema(1, 60), reason: normalizedTextSchema(1, 500), itemIds: { type: "array", maxItems: 20, uniqueItems: true, items: normalizedTextSchema(1, 100) }, expectedVersion }, ["reasonCode"]),
+  RejectCommand: strictObject({ reasonCode: normalizedTextSchema(1, 60), note: normalizedTextSchema(1, 2000), expectedVersion }, ["reasonCode"]),
+  SampleCommand: strictObject({ accessionCode: { type: "string", pattern: "^[A-Z0-9][A-Z0-9-]{2,39}$" }, sampleType: normalizedTextSchema(1, 100), expectedVersion }, ["accessionCode", "sampleType"]),
+  RecollectionCommand: strictObject({ reasonCode: normalizedTextSchema(1, 60), note: normalizedTextSchema(1, 2000), expectedVersion }, ["reasonCode"]),
+  ScheduleCommand: {
+    ...strictObject({
+      startsAt: strictDateTime,
+      endsAt: strictDateTime,
+      resource: normalizedTextSchema(1, 100), reason: normalizedTextSchema(1, 500), expectedVersion
+    }, ["startsAt", "endsAt", "resource"]),
+    "x-cross-field-constraints": ["endsAt must be after startsAt", "endsAt - startsAt must be at most 24 hours"]
+  },
+  ResultDraftCommand: strictObject({
+    narrative: normalizedTextSchema(1, 20000), conclusion: normalizedTextSchema(1, 5000),
+    content: { type: "object", maxProperties: 100, propertyNames: { maxLength: 100 }, additionalProperties: true }, expectedVersion
+  }, ["narrative", "content"]),
+  ReleaseResultCommand: strictObject({ critical: { type: "boolean" }, expectedVersion }),
+  AmendResultCommand: strictObject({
+    reason: normalizedTextSchema(1, 500), narrative: normalizedTextSchema(1, 20000), conclusion: normalizedTextSchema(1, 5000),
+    content: { type: "object", maxProperties: 100, propertyNames: { maxLength: 100 }, additionalProperties: true },
+    critical: { type: "boolean" }, expectedVersion
+  }, ["reason", "narrative", "content"]),
+  VoidResultCommand: strictObject({ reason: normalizedTextSchema(1, 500), expectedVersion }, ["reason"]),
+  ReviewResultCommand: strictObject({ versionId: normalizedTextSchema(1, 100), expectedVersion }, ["versionId"]),
+  AttachmentUploadSessionRequest: strictObject({
+    filename: normalizedTextSchema(1, 255), mimeType: { type: "string", enum: supportedAttachmentMediaTypes }, sizeBytes: { type: "integer", minimum: 1, maximum: 26214400 },
+    checksum: { type: "string", pattern: "^[a-fA-F0-9]{64}$" }, expectedVersion
+  }, ["filename", "mimeType", "sizeBytes", "checksum"]),
+  AttachmentBinary: { type: "string", format: "binary", maxLength: 26214400 },
+  NotificationAcknowledge: strictObject({ expectedVersion, reason: normalizedTextSchema(1, 500), confirm: { type: "boolean", const: true } }, ["reason", "confirm"])
+};
+
+const timestamp = { type: "string", format: "date-time" };
+const boundedString = { type: "string", maxLength: 20000 };
+const nonNegativeInteger = { type: "integer", minimum: 0 };
+const positiveVersion = { type: "integer", minimum: 1 };
+const prioritySchema = { type: "string", enum: ["ROUTINE", "URGENT", "EMERGENCY"] };
+const workflowSchema = { type: "string", enum: ["LABORATORY", "RADIOLOGY", "ULTRASOUND"] };
+const aggregateStatusSchema = { type: "string", enum: ["REQUESTED", "IN_PROGRESS", "PARTIALLY_AVAILABLE", "RESULTS_AVAILABLE", "COMPLETED", "CANCELLED"] };
+const resultVersionStateSchema = { type: "string", enum: ["DRAFT", "RELEASED", "SUPERSEDED", "VOIDED"] };
+const arrayOf = (schema, options = {}) => ({ type: "array", items: schema, ...options });
+
+const publicUserSchema = strictObject({
+  id: identifier, email: { type: "string", format: "email", maxLength: 320 }, displayName: stringSchema(1, 160),
+  role: { type: "string", enum: roleCodes }, departmentCode: stringSchema(1, 60),
+  managedDepartmentCodes: arrayOf(stringSchema(1, 60), { maxItems: 20 }), timezone: stringSchema(1, 80)
+}, ["id", "email", "displayName", "role", "departmentCode", "timezone"]);
+const managedUserSchema = strictObject({
+  ...publicUserSchema.properties, active: { type: "boolean" }, createdAt: timestamp, version: positiveVersion
+}, ["id", "email", "displayName", "role", "departmentCode", "timezone", "active", "createdAt", "version"]);
+const patientSchema = strictObject({
+  id: identifier, displayName: stringSchema(1, 200), species: stringSchema(1, 100), breed: stringSchema(1, 100),
+  sex: stringSchema(1, 40), birthDate: { type: "string", format: "date" }, ownerLabel: stringSchema(1, 200),
+  externalId: stringSchema(1, 100), active: { type: "boolean" }
+}, ["id", "displayName", "species", "breed", "sex", "ownerLabel", "externalId", "active"]);
+const encounterSchema = strictObject({
+  id: identifier, patientId: identifier, externalId: stringSchema(1, 100), type: { type: "string", enum: ["INPATIENT", "EMERGENCY", "OUTPATIENT"] },
+  status: { type: "string", enum: ["OPEN", "CLOSED"] }, openedAt: timestamp, closedAt: timestamp
+}, ["id", "patientId", "externalId", "type", "status", "openedAt"]);
+const admissionSchema = strictObject({
+  id: identifier, encounterId: identifier, departmentCode: stringSchema(1, 60), ward: stringSchema(1, 100), bed: stringSchema(1, 100),
+  admittedAt: timestamp, dischargedAt: timestamp, version: positiveVersion
+}, ["id", "encounterId", "departmentCode", "ward", "bed", "admittedAt", "version"]);
+const diagnosticServiceSchema = strictObject({
+  id: identifier, code: stringSchema(2, 60), name: stringSchema(1, 120), category: { type: "string", enum: ["LABORATORY", "IMAGING"] },
+  departmentCode: stringSchema(1, 60), workflowType: workflowSchema, requiresSample: { type: "boolean" }, requiresSchedule: { type: "boolean" },
+  allowsAttachment: { type: "boolean" }, active: { type: "boolean" }, resultSchema: { type: "string", enum: ["NUMERIC_PANEL", "NARRATIVE"] },
+  slaHours: schemaReference("SlaHours"), version: positiveVersion
+}, ["id", "code", "name", "category", "departmentCode", "workflowType", "requiresSample", "requiresSchedule", "allowsAttachment", "active", "resultSchema", "slaHours", "version"]);
+const reasonCodeSchema = strictObject({
+  id: identifier, type: { type: "string", enum: ["RECOLLECTION", "CANCEL", "REJECT", "AMEND"] }, code: stringSchema(2, 60),
+  label: stringSchema(1, 160), active: { type: "boolean" }, version: positiveVersion
+}, ["id", "type", "code", "label", "active", "version"]);
+const diagnosticRequestSchema = strictObject({
+  id: identifier, requestCode: stringSchema(1, 100), patientId: identifier, encounterId: identifier, admissionId: identifier,
+  requesterId: identifier, requestingDepartmentCode: stringSchema(1, 60), priority: prioritySchema, aggregateStatus: aggregateStatusSchema,
+  itemIds: arrayOf(identifier), createdAt: timestamp, updatedAt: timestamp, version: positiveVersion
+}, ["id", "requestCode", "patientId", "encounterId", "requesterId", "requestingDepartmentCode", "priority", "aggregateStatus", "itemIds", "createdAt", "updatedAt", "version"]);
+const diagnosticItemSchema = strictObject({
+  id: identifier, requestId: identifier, serviceId: identifier, departmentCode: stringSchema(1, 60), workflowType: workflowSchema,
+  priority: prioritySchema, status: { type: "string", enum: itemStates }, note: { type: "string", maxLength: 2000 }, requestedAt: timestamp, receivedAt: timestamp,
+  startedAt: timestamp, performedAt: timestamp, releasedAt: timestamp, reviewedAt: timestamp, completedAt: timestamp,
+  slaStartedAt: timestamp, dueAt: timestamp, slaPolicyVersion: positiveVersion, version: positiveVersion,
+  cancellationReason: stringSchema(1, 500), rejectionReason: stringSchema(1, 2000), currentResultId: identifier,
+  currentSampleId: identifier, procedureId: identifier
+}, ["id", "requestId", "serviceId", "departmentCode", "workflowType", "priority", "status", "requestedAt", "slaStartedAt", "dueAt", "slaPolicyVersion", "version"]);
+const requestItemSchema = strictObject({ ...diagnosticItemSchema.properties, service: schemaReference("DiagnosticService") }, [
+  ...diagnosticItemSchema.required, "service"
+]);
+const requestViewSchema = strictObject({
+  ...diagnosticRequestSchema.properties, patient: schemaReference("Patient"), encounter: schemaReference("Encounter"), items: arrayOf(schemaReference("RequestItem"))
+}, [...diagnosticRequestSchema.required, "patient", "encounter", "items"]);
+const itemViewSchema = strictObject({
+  item: schemaReference("DiagnosticItem"), request: schemaReference("RequestView"), patient: schemaReference("Patient"), service: schemaReference("DiagnosticService")
+}, ["item", "request", "patient", "service"]);
+const sampleSchema = strictObject({
+  id: identifier, requestId: identifier, accessionCode: stringSchema(1, 40), sampleType: stringSchema(1, 100),
+  status: { type: "string", enum: ["EXPECTED", "RECEIVED", "REJECTED", "REPLACED"] }, replacesSampleId: identifier,
+  rejectionCode: stringSchema(1, 60), rejectionNote: stringSchema(1, 2000), itemIds: arrayOf(identifier),
+  collectedAt: timestamp, receivedAt: timestamp, receivedBy: identifier, version: positiveVersion
+}, ["id", "requestId", "accessionCode", "sampleType", "status", "itemIds", "version"]);
+const procedureSchema = strictObject({
+  id: identifier, itemId: identifier, workflowType: { type: "string", enum: ["RADIOLOGY", "ULTRASOUND"] },
+  status: { type: "string", enum: ["EXPECTED", "SCHEDULED", "IN_PROGRESS", "PERFORMED", "AWAITING_REPORT"] },
+  scheduleIds: arrayOf(identifier), performedAt: timestamp, performedBy: identifier, version: positiveVersion
+}, ["id", "itemId", "workflowType", "status", "scheduleIds", "version"]);
+const procedureScheduleSchema = strictObject({
+  id: identifier, procedureId: identifier, startsAt: timestamp, endsAt: timestamp, resource: stringSchema(1, 100),
+  status: { type: "string", enum: ["SCHEDULED", "CANCELLED", "COMPLETED"] }, reason: stringSchema(1, 500),
+  actorId: identifier, createdAt: timestamp
+}, ["id", "procedureId", "startsAt", "endsAt", "resource", "status", "actorId", "createdAt"]);
+const resultSchema = strictObject({
+  id: identifier, itemId: identifier, currentVersionId: identifier, lifecycleStatus: { type: "string", enum: ["DRAFT", "RELEASED", "VOIDED"] },
+  needsReReview: { type: "boolean" }, version: positiveVersion
+}, ["id", "itemId", "lifecycleStatus", "needsReReview", "version"]);
+const resultVersionSchema = strictObject({
+  id: identifier, resultId: identifier, sequence: positiveVersion, status: resultVersionStateSchema, content: schemaReference("JsonObject"),
+  narrative: boundedString, conclusion: { type: "string", maxLength: 5000 }, authorId: identifier, createdAt: timestamp, releasedAt: timestamp,
+  releasedBy: identifier, amendmentReason: stringSchema(1, 500), supersedesId: identifier, critical: { type: "boolean" },
+  needsReReview: { type: "boolean" }, version: positiveVersion
+}, ["id", "resultId", "sequence", "status", "content", "narrative", "authorId", "createdAt", "critical", "needsReReview", "version"]);
+const resultViewSchema = strictObject({
+  result: schemaReference("Result"), version: schemaReference("ResultVersion"), item: schemaReference("DiagnosticItem"),
+  request: schemaReference("RequestView"), patient: schemaReference("Patient"), service: schemaReference("DiagnosticService")
+}, ["result", "version", "item", "request", "patient", "service"]);
+const publicAttachmentSchema = strictObject({
+  id: identifier, resultVersionId: identifier, safeName: stringSchema(1, 120), detectedMime: stringSchema(1, 100), sizeBytes: { type: "integer", minimum: 1, maximum: 26214400 },
+  checksum: { type: "string", pattern: "^[a-fA-F0-9]{64}$" }, scanStatus: { type: "string", enum: ["PENDING", "CLEAN", "QUARANTINED", "FAILED"] },
+  uploadStatus: { type: "string", enum: ["INITIATED", "UPLOADED", "FINALIZED"] }, expiresAt: timestamp, createdBy: identifier, createdAt: timestamp
+}, ["id", "resultVersionId", "safeName", "detectedMime", "sizeBytes", "checksum", "scanStatus", "uploadStatus", "createdBy", "createdAt"]);
+const notificationSchema = strictObject({
+  id: identifier, category: { type: "string", enum: ["INFORMATIONAL", "ACTIONABLE", "CRITICAL", "ADMINISTRATIVE"] },
+  priority: { type: "string", enum: ["NORMAL", "HIGH", "URGENT"] }, recipientUserId: identifier,
+  entityType: { type: "string", enum: ["REQUEST", "ITEM", "RESULT_VERSION", "SAMPLE"] }, entityId: identifier,
+  deepLink: stringSchema(1, 500), title: stringSchema(1, 500), body: stringSchema(1, 2000), dedupeKey: stringSchema(1, 500),
+  state: { type: "string", enum: ["PENDING", "DELIVERED", "SEEN", "ACKNOWLEDGED", "ESCALATED"] },
+  createdAt: timestamp, acknowledgedAt: timestamp, acknowledgedBy: identifier, attempts: nonNegativeInteger, version: positiveVersion
+}, ["id", "category", "priority", "recipientUserId", "entityType", "entityId", "deepLink", "title", "body", "dedupeKey", "state", "createdAt", "attempts", "version"]);
+const auditEventSchema = strictObject({
+  id: identifier, eventType: stringSchema(1, 200), actorId: identifier, entityType: stringSchema(1, 200), entityId: identifier,
+  previousState: boundedString, newState: boundedString, correlationId: stringSchema(1, 100),
+  metadata: { type: "object", additionalProperties: { type: ["string", "number", "boolean", "null"] } }, occurredAt: timestamp
+}, ["id", "eventType", "entityType", "entityId", "correlationId", "metadata", "occurredAt"]);
+const metaSchema = strictObject({
+  requestId: { type: "string", pattern: "^req_" }, correlationId: stringSchema(1, 100), nextCursor: { type: "string" },
+  limit: { type: "integer", minimum: 1, maximum: 100 }, total: { type: "integer", minimum: 0 }
+}, ["requestId", "correlationId"]);
+
+const responseDataSchemas = {
+  JsonValue: { oneOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }, { type: "null" }, { type: "array", items: schemaReference("JsonValue") }, { type: "object", additionalProperties: schemaReference("JsonValue") }] },
+  JsonObject: { type: "object", additionalProperties: schemaReference("JsonValue"), maxProperties: 100 },
+  PublicUser: publicUserSchema,
+  ManagedUser: managedUserSchema,
+  Patient: patientSchema,
+  Encounter: encounterSchema,
+  Admission: admissionSchema,
+  DiagnosticService: diagnosticServiceSchema,
+  ReasonCode: reasonCodeSchema,
+  DiagnosticRequest: diagnosticRequestSchema,
+  DiagnosticItem: diagnosticItemSchema,
+  RequestItem: requestItemSchema,
+  RequestView: requestViewSchema,
+  ItemView: itemViewSchema,
+  Sample: sampleSchema,
+  Procedure: procedureSchema,
+  ProcedureSchedule: procedureScheduleSchema,
+  Result: resultSchema,
+  ResultVersion: resultVersionSchema,
+  ResultView: resultViewSchema,
+  PublicAttachment: publicAttachmentSchema,
+  Notification: notificationSchema,
+  AuditEvent: auditEventSchema,
+  LivenessData: strictObject({ status: { type: "string", const: "ok" }, service: { type: "string", const: "cvg-diagnostics-hub" } }, ["status", "service"]),
+  ReadinessData: strictObject({ status: { type: "string", const: "ready" }, dataMode: { type: "string", enum: ["memory", "postgres"] }, storageMode: stringSchema(1, 100) }, ["status", "dataMode", "storageMode"]),
+  LoginData: strictObject({ user: schemaReference("PublicUser"), expiresAt: timestamp }, ["user", "expiresAt"]),
+  CurrentSessionData: strictObject({ user: schemaReference("PublicUser") }, ["user"]),
+  LogoutData: strictObject({ loggedOut: { type: "boolean", const: true } }, ["loggedOut"]),
+  ReauthenticationData: strictObject({ user: schemaReference("PublicUser"), reauthenticatedAt: timestamp }, ["user", "reauthenticatedAt"]),
+  ManagedUserList: arrayOf(schemaReference("ManagedUser")),
+  DiagnosticServiceList: arrayOf(schemaReference("DiagnosticService")),
+  ReasonCodeList: arrayOf(schemaReference("ReasonCode")),
+  PatientList: arrayOf(schemaReference("Patient"), { maxItems: 100 }),
+  PatientDiagnostics: strictObject({ patient: schemaReference("Patient"), items: arrayOf(schemaReference("RequestView")), events: arrayOf(schemaReference("AuditEvent")), nextCursor: schemaReference("Cursor"), limit: schemaReference("Limit"), total: nonNegativeInteger }, ["patient", "items", "events", "limit", "total"]),
+  EncounterList: arrayOf(schemaReference("Encounter")),
+  RequestViewList: arrayOf(schemaReference("RequestView")),
+  ItemCommandResult: strictObject({ item: schemaReference("DiagnosticItem"), request: schemaReference("RequestView") }, ["item", "request"]),
+  SampleCommandResult: strictObject({ sample: schemaReference("Sample"), items: arrayOf(schemaReference("DiagnosticItem")), request: schemaReference("RequestView") }, ["sample", "items", "request"]),
+  RecollectionCommandResult: strictObject({ sample: schemaReference("Sample"), replacement: schemaReference("Sample"), items: arrayOf(schemaReference("DiagnosticItem")), request: schemaReference("RequestView") }, ["sample", "replacement", "items", "request"]),
+  ProcedureScheduleCommandResult: strictObject({ item: schemaReference("DiagnosticItem"), procedure: schemaReference("Procedure"), schedule: schemaReference("ProcedureSchedule"), request: schemaReference("RequestView") }, ["item", "procedure", "schedule", "request"]),
+  ProcedureExecutionCommandResult: strictObject({ item: schemaReference("DiagnosticItem"), procedure: schemaReference("Procedure"), request: schemaReference("RequestView") }, ["item", "procedure", "request"]),
+  ProcedureRescheduleCommandResult: strictObject({ procedure: schemaReference("Procedure"), schedule: schemaReference("ProcedureSchedule"), history: arrayOf(schemaReference("ProcedureSchedule")), item: schemaReference("DiagnosticItem"), request: schemaReference("DiagnosticRequest") }, ["procedure", "schedule", "history", "item", "request"]),
+  ResultCommandResult: strictObject({ result: schemaReference("Result"), version: schemaReference("ResultVersion"), item: schemaReference("DiagnosticItem"), request: schemaReference("RequestView") }, ["result", "version", "item", "request"]),
+  AmendCommandResult: strictObject({ result: schemaReference("Result"), version: schemaReference("ResultVersion"), previousVersion: schemaReference("ResultVersion"), item: schemaReference("DiagnosticItem"), request: schemaReference("RequestView") }, ["result", "version", "previousVersion", "item", "request"]),
+  VoidCommandResult: strictObject({ result: schemaReference("Result"), version: schemaReference("ResultVersion"), item: schemaReference("DiagnosticItem"), request: schemaReference("RequestView"), replacementRequired: { type: "boolean", const: true } }, ["result", "version", "item", "request", "replacementRequired"]),
+  AttachmentSessionResult: strictObject({ attachment: schemaReference("PublicAttachment"), uploadUrl: { type: "string", pattern: "^/api/v1/attachments/" }, expiresAt: timestamp }, ["attachment", "uploadUrl", "expiresAt"]),
+  AttachmentFinalizationResult: strictObject({ attachment: schemaReference("PublicAttachment") }, ["attachment"]),
+  ResultVersionList: arrayOf(schemaReference("ResultVersion")),
+  ResultViewedData: strictObject({ versionId: identifier, resultId: identifier, viewedAt: timestamp }, ["versionId", "resultId", "viewedAt"]),
+  ReportView: strictObject({ ...resultViewSchema.properties, attachments: arrayOf(schemaReference("PublicAttachment")) }, [...resultViewSchema.required, "attachments"]),
+  AuditEventList: arrayOf(schemaReference("AuditEvent"), { maxItems: 100 }),
+  NotificationList: arrayOf(schemaReference("Notification"), { maxItems: 100 }),
+  QueueItem: strictObject({ ...diagnosticItemSchema.properties, requestCode: stringSchema(1, 100), patient: strictObject({ id: identifier, displayName: stringSchema(1, 200), species: stringSchema(1, 100), sex: stringSchema(1, 40), externalId: stringSchema(1, 100) }, ["id", "displayName", "species", "sex", "externalId"]), service: strictObject({ id: identifier, code: stringSchema(1, 60), name: stringSchema(1, 120) }, ["id", "code", "name"]), overdue: { type: "boolean" }, nextAction: stringSchema(1, 200) }, [...diagnosticItemSchema.required, "requestCode", "patient", "service", "overdue", "nextAction"]),
+  QueueItemList: arrayOf(schemaReference("QueueItem"), { maxItems: 100 }),
+  SearchResult: strictObject({ type: { type: "string", enum: ["REQUEST", "ITEM"] }, id: identifier, label: stringSchema(1, 500), patient: stringSchema(1, 200), status: { type: "string", enum: [...itemStates, "PARTIALLY_AVAILABLE", "RESULTS_AVAILABLE"] }, priority: prioritySchema, updatedAt: timestamp, departmentCode: stringSchema(1, 60), deepLink: stringSchema(1, 500) }, ["type", "id", "label", "patient", "status", "priority", "updatedAt", "departmentCode", "deepLink"]),
+  SearchResultList: arrayOf(schemaReference("SearchResult"), { maxItems: 100 }),
+  TimelineEventList: arrayOf(schemaReference("AuditEvent"), { maxItems: 100 }),
+  DashboardIndicator: strictObject({ key: { type: "string", enum: ["overdue", "recollections", "newResults", "critical", "totalActive"] }, label: stringSchema(1, 200), count: nonNegativeInteger, denominator: nonNegativeInteger, denominatorDefinition: stringSchema(1, 500), definition: stringSchema(1, 1000), nextAction: stringSchema(1, 500) }, ["key", "label", "count", "denominator", "denominatorDefinition", "definition", "nextAction"]),
+  DashboardView: strictObject({ overdue: nonNegativeInteger, recollections: nonNegativeInteger, newResults: nonNegativeInteger, critical: nonNegativeInteger, totalActive: nonNegativeInteger, updatedAt: timestamp, window: strictObject({ kind: { type: "string", const: "CURRENT_STATE" }, label: { type: "string", const: "Estado atual" }, timezone: stringSchema(1, 80), asOf: timestamp }, ["kind", "label", "timezone", "asOf"]), indicators: arrayOf(schemaReference("DashboardIndicator"), { minItems: 5, maxItems: 5 }) }, ["overdue", "recollections", "newResults", "critical", "totalActive", "updatedAt", "window", "indicators"]),
+  ManagementOverview: strictObject({ asOf: timestamp, scope: strictObject({ departments: arrayOf(stringSchema(1, 60)), label: stringSchema(1, 500) }, ["departments", "label"]), summary: strictObject({ totalRequests: nonNegativeInteger, activeItems: nonNegativeInteger, overdue: nonNegativeInteger, recollections: nonNegativeInteger, newResults: nonNegativeInteger, critical: nonNegativeInteger, pendingRequests: nonNegativeInteger, completedToday: nonNegativeInteger }, ["totalRequests", "activeItems", "overdue", "recollections", "newResults", "critical", "pendingRequests", "completedToday"]), departments: arrayOf(strictObject({ departmentCode: stringSchema(1, 60), serviceCount: nonNegativeInteger, totalRequests: nonNegativeInteger, activeItems: nonNegativeInteger, overdue: nonNegativeInteger, pending: nonNegativeInteger }, ["departmentCode", "serviceCount", "totalRequests", "activeItems", "overdue", "pending"])), pending: arrayOf(strictObject({ id: identifier, requestId: identifier, requestCode: stringSchema(1, 100), patient: stringSchema(1, 200), service: stringSchema(1, 120), departmentCode: stringSchema(1, 60), status: { type: "string", enum: itemStates }, priority: prioritySchema, dueAt: timestamp, overdue: { type: "boolean" }, nextAction: stringSchema(1, 500), deepLink: stringSchema(1, 500) }, ["id", "requestId", "requestCode", "patient", "service", "departmentCode", "status", "priority", "dueAt", "overdue", "nextAction", "deepLink"])), recentRequests: arrayOf(strictObject({ id: identifier, requestCode: stringSchema(1, 100), patient: stringSchema(1, 200), aggregateStatus: aggregateStatusSchema, priority: prioritySchema, updatedAt: timestamp, itemCount: nonNegativeInteger, deepLink: stringSchema(1, 500) }, ["id", "requestCode", "patient", "aggregateStatus", "priority", "updatedAt", "itemCount", "deepLink"])) }, ["asOf", "scope", "summary", "departments", "pending", "recentRequests"])
+};
+
+const supportSchemas = {
+  SlaHours: strictObject({
+    ROUTINE: { type: "number", exclusiveMinimum: 0, maximum: 720 }, URGENT: { type: "number", exclusiveMinimum: 0, maximum: 720 },
+    EMERGENCY: { type: "number", exclusiveMinimum: 0, maximum: 720 }
+  }, ["ROUTINE", "URGENT", "EMERGENCY"]),
+  Identifier: identifier,
+  ServiceIdentifier: serviceIdentifier,
+  Boolean: { type: "boolean" },
+  DateTime: strictDateTime,
+  Cursor: { type: "string", maxLength: 200, pattern: "^[A-Za-z0-9_-]+$" },
+  Limit: { type: "integer", minimum: 1, maximum: 100, default: 25 },
+  DepartmentCode: normalizedDepartmentCodeSchema,
+  Priority: { type: "string", enum: ["ROUTINE", "URGENT", "EMERGENCY"] },
+  ItemState: { type: "string", enum: itemStates },
+  PatientQuery: { type: "string", maxLength: 200 },
+  SearchQuery: { ...stringSchema(2, 200), pattern: "^\\s*\\S(?:[\\s\\S]*\\S|\\S)\\s*$" },
+  SearchTypes: { type: "string", pattern: "^(REQUEST|ITEM)(\\s*,\\s*(REQUEST|ITEM))*$" },
+  NotificationFilter: { type: "string", enum: ["ALL", "UNREAD", "ACTIONABLE", "CRITICAL"] },
+  ResponseMeta: metaSchema,
+  ErrorEnvelope: strictObject({
+    error: strictObject({ code: stringSchema(1, 100), message: stringSchema(1, 1000), details: { type: "object", additionalProperties: true }, correlationId: stringSchema(1, 100) }, ["code", "message", "correlationId"])
+  }, ["error"])
+};
+
+const responseEnvelopeSchemas = Object.fromEntries(API_OPERATIONS.flatMap((operation) => {
+  if (!operation.successMediaTypes.includes("application/json")) return [];
+  if (!operation.successDataSchema) throw new Error(`${operation.method} ${operation.path} is missing successDataSchema.`);
+  return [[`${operation.operationId}SuccessResponse`, strictObject({
+    data: schemaReference(operation.successDataSchema),
+    meta: schemaReference("ResponseMeta")
+  }, ["data", "meta"])]];
+}));
+
+const errorDescriptions = {
+  400: "Invalid or malformed request", 401: "Authentication failed", 403: "Authenticated actor is not authorized",
+  404: "Resource or concealed route not found", 409: "State, concurrency, or idempotency conflict",
+  413: "Request body exceeds the configured limit", 415: "Request media type is not supported", 422: "Semantically invalid command",
+  429: "Rate limit exceeded", 500: "Unexpected safe server error", 503: "Required dependency is unavailable"
+};
+
+function headerParameter(header) {
+  const schemas = {
+    "x-correlation-id": { type: "string", minLength: 1, maxLength: 100, pattern: "^[A-Za-z0-9._:-]+$" },
+    "x-csrf-token": stringSchema(1, 500), "idempotency-key": nonBlankStringSchema(1, 200),
+    "if-match": { type: "string", pattern: "^(?:[1-9][0-9]{0,14}|\\\"[1-9][0-9]{0,14}\\\"|W/\\\"[1-9][0-9]{0,14}\\\")$" }, "last-event-id": stringSchema(1, 200),
+    "x-duplicate-override": { type: "string", enum: ["true"] }
+  };
+  const names = {
+    "x-correlation-id": "X-Correlation-Id", "x-csrf-token": "X-CSRF-Token", "idempotency-key": "Idempotency-Key",
+    "if-match": "If-Match", "last-event-id": "Last-Event-ID", "x-duplicate-override": "X-Duplicate-Override"
+  };
+  return { name: names[header.name], in: "header", required: header.required, schema: schemas[header.name] };
 }
-for (const [path, item] of Object.entries(document.paths ?? {})) {
-  if (!path.startsWith("/")) throw new Error(`Path inválido: ${path}`);
-  for (const [method, operation] of Object.entries(item)) {
-    if (!["get", "post", "put", "patch", "delete", "head", "options", "trace"].includes(method)) continue;
-    if (!operation || typeof operation !== "object") throw new Error(`Operação inválida: ${method.toUpperCase()} ${path}`);
-    if ("$ref" in operation) {
-      if (typeof operation.$ref !== "string" || !operation.$ref.startsWith("#/components/operations/")) throw new Error(`Ref de operação inválida: ${method.toUpperCase()} ${path}`);
-      const name = operation.$ref.split("/").pop();
-      if (!name || !document.components?.operations?.[name]?.responses) throw new Error(`Ref de operação sem responses: ${operation.$ref}`);
-      continue;
+
+function pathParameters(path) {
+  return [...path.matchAll(/\{([^}]+)\}/g)].map((match) => ({ name: match[1], in: "path", required: true, schema: pathIdentifier }));
+}
+
+function queryParameter(parameter) {
+  return { name: parameter.name, in: "query", ...(parameter.required ? { required: true } : {}), schema: schemaReference(parameter.schema) };
+}
+
+function responseHeaders(names, operation) {
+  const cacheControl = operation?.successMediaTypes.includes("text/event-stream")
+    ? "no-cache, no-transform"
+    : operation?.path === "/attachments/{attachmentId}/download" ? "private, no-store" : "no-store";
+  const headers = {
+    "x-correlation-id": ["X-Correlation-Id", { $ref: "#/components/headers/CorrelationId" }],
+    "cache-control": ["Cache-Control", { required: true, schema: { type: "string", enum: [cacheControl] } }],
+    "set-cookie": ["Set-Cookie", { required: true, description: "Opaque session and CSRF cookies; multiple Set-Cookie fields may be emitted.", schema: { type: "string" } }],
+    "content-length": ["Content-Length", { required: true, schema: { type: "string", pattern: "^[0-9]+$" } }],
+    "content-disposition": ["Content-Disposition", { required: true, schema: { type: "string", pattern: "^attachment; filename=\\\"[^\\\"]+\\\"$" } }],
+    connection: ["Connection", { required: true, schema: { type: "string", enum: ["keep-alive"] } }]
+  };
+  return Object.fromEntries(names.map((name) => headers[name]));
+}
+
+function successContent(operation) {
+  return Object.fromEntries(operation.successMediaTypes.map((mediaType) => {
+    const schema = mediaType === "application/json" ? schemaReference(`${operation.operationId}SuccessResponse`)
+      : mediaType === "application/pdf" || mediaType === "image/jpeg" || mediaType === "image/png"
+        ? schemaReference("AttachmentBinary") : { type: "string" };
+    return [mediaType, { schema }];
+  }));
+}
+
+function responsesFor(operation) {
+  const responses = {};
+  for (const status of operation.successStatuses) {
+    responses[String(status)] = {
+      description: status === 201 ? "Resource created" : "Operation completed",
+      headers: responseHeaders(operation.successHeaders, operation),
+      content: successContent(operation)
+    };
+  }
+  for (const status of operation.errorStatuses) {
+    responses[String(status)] = {
+      description: errorDescriptions[status], headers: responseHeaders(["x-correlation-id", "cache-control"]),
+      content: { "application/json": { schema: schemaReference("ErrorEnvelope") } }
+    };
+  }
+  return responses;
+}
+
+function operationObject(operation) {
+  const security = operation.authentication === "public"
+    ? []
+    : operation.csrf ? [{ session: [], csrfCookie: [] }] : [{ session: [] }];
+  return {
+    operationId: operation.operationId,
+    summary: operation.summary,
+    description: `${operation.summary}. Responses never expose internal exception or persistence details.`,
+    tags: [operation.tag],
+    security,
+    "x-required-permissions": operation.authorization.requiredPermissions,
+    "x-conditional-permission-rules": operation.authorization.conditionalPermissionRules,
+    "x-authorization-conditions": operation.authorization.conditions,
+    "x-step-up-required": operation.authorization.stepUpRequired,
+    ...(operation.concurrencyGuard ? { "x-concurrency-guard": operation.concurrencyGuard } : {}),
+    ...(operation.conditionalRequestRules ? { "x-conditional-request-rules": operation.conditionalRequestRules } : {}),
+    ...(operation.queryConstraints ? { "x-query-constraints": operation.queryConstraints } : {}),
+    parameters: [...operation.requestHeaders.map(headerParameter), ...pathParameters(operation.path), ...(operation.queryParameters ?? []).map(queryParameter)],
+    ...(operation.requestBody ? { requestBody: { required: true, content: { [operation.requestBody.mediaType]: { schema: schemaReference(operation.requestBody.schema) } } } } : {}),
+    responses: responsesFor(operation)
+  };
+}
+
+function createDocument() {
+  const paths = {};
+  for (const operation of API_OPERATIONS) {
+    const method = operation.method.toLowerCase();
+    paths[operation.path] = { ...(paths[operation.path] ?? {}), [method]: operationObject(operation) };
+  }
+  const tags = [...new Set(API_OPERATIONS.map(({ tag }) => tag))].sort().map((name) => ({ name, description: `${name} operations for the CVG diagnostic workflow.` }));
+  return {
+    openapi: "3.1.0",
+    jsonSchemaDialect: "https://json-schema.org/draft/2020-12/schema",
+    info: {
+      title: "CVG Diagnostics Hub API", version: "1.0.0",
+      description: "Exact, executable contract for the versioned CVG veterinary diagnostics API. All examples and local identities are synthetic.",
+      license: { name: "Proprietary", identifier: "LicenseRef-Proprietary" }
+    },
+    servers: [{ url: "/api/v1", description: "Same-origin versioned API" }],
+    tags,
+    paths,
+    components: {
+      securitySchemes: {
+        session: { type: "apiKey", in: "cookie", name: "cvg_session", description: "Opaque HttpOnly session cookie." },
+        csrfCookie: { type: "apiKey", in: "cookie", name: "cvg_csrf", description: "Readable double-submit CSRF cookie. Authenticated mutations require this cookie and the matching X-CSRF-Token header." }
+      },
+      headers: {
+        CorrelationId: { description: "Stable correlation identifier for support and audit tracing.", required: true, schema: stringSchema(1, 100) }
+      },
+      schemas: { ...requestSchemas, ...supportSchemas, ...responseDataSchemas, ...responseEnvelopeSchemas }
     }
-    if (!("responses" in operation)) throw new Error(`Operação sem responses: ${method.toUpperCase()} ${path}`);
+  };
+}
+
+function operationKeys(document) {
+  const methods = new Set(["delete", "get", "patch", "post", "put"]);
+  return Object.entries(document.paths ?? {}).flatMap(([path, pathItem]) =>
+    Object.keys(pathItem ?? {}).filter((method) => methods.has(method)).map((method) => `${method.toUpperCase()} ${path}`)
+  ).sort();
+}
+
+function assertSemanticDrift(document, expected) {
+  const actualKeys = operationKeys(document);
+  const expectedKeys = operationKeys(expected);
+  if (!isDeepStrictEqual(actualKeys, expectedKeys)) {
+    const missing = expectedKeys.filter((key) => !actualKeys.includes(key));
+    const extra = actualKeys.filter((key) => !expectedKeys.includes(key));
+    throw new Error(`OpenAPI method/path drift. Missing: ${missing.join(", ") || "none"}. Extra: ${extra.join(", ") || "none"}.`);
+  }
+  if (!isDeepStrictEqual(document, expected)) {
+    throw new Error("OpenAPI semantic drift: regenerate after changing manifest identity, auth, headers, request body/media/schema, query parameters, or responses.");
+  }
+  if (document.components?.operations !== undefined) throw new Error("components.operations is not a standard OpenAPI component category.");
+  if (API_OPERATIONS.length !== 62 || new Set(API_OPERATIONS.map(({ path }) => path)).size !== 58) throw new Error("The audited API surface must remain exactly 62 operations across 58 paths.");
+  const operationIds = API_OPERATIONS.map(({ operationId }) => operationId);
+  if (new Set(operationIds).size !== operationIds.length) throw new Error("Manifest operationId values must be unique.");
+  for (const operation of API_OPERATIONS) {
+    const csrf = operation.requestHeaders.find(({ name }) => name === "x-csrf-token");
+    if (operation.csrf !== Boolean(csrf?.required)) throw new Error(`${operation.method} ${operation.path} CSRF drift.`);
+    if (operation.authentication === "public" && csrf) throw new Error(`${operation.method} ${operation.path} cannot be public and require CSRF.`);
+    if (operation.successMediaTypes.includes("application/json") && !operation.successDataSchema) {
+      throw new Error(`${operation.method} ${operation.path} must declare an explicit JSON success data schema.`);
+    }
+    if (!operation.successMediaTypes.includes("application/json") && operation.successDataSchema) {
+      throw new Error(`${operation.method} ${operation.path} cannot declare JSON success data for a non-JSON operation.`);
+    }
   }
 }
-console.log(`OpenAPI validation PASS: ${Object.keys(document.paths).length} paths verificadas.`);
+
+const expectedDocument = createDocument();
+if (process.argv.includes("--write")) {
+  await writeFile(documentUrl, `${JSON.stringify(expectedDocument, null, 2)}\n`, "utf8");
+  console.log(`OpenAPI generated: ${API_OPERATIONS.length} operations across ${Object.keys(expectedDocument.paths).length} paths.`);
+} else {
+  const document = JSON.parse(await readFile(documentUrl, "utf8"));
+  assertSemanticDrift(document, expectedDocument);
+  console.log(`OpenAPI manifest drift validation PASS: ${API_OPERATIONS.length} operations across ${Object.keys(document.paths).length} paths.`);
+}

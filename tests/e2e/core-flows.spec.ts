@@ -3,10 +3,10 @@ import { expect, test } from "@playwright/test";
 async function signInAs(page: import("@playwright/test").Page, email: string, expectedHeading: RegExp): Promise<void> {
   await page.goto("/login");
   await page.getByLabel("E-mail profissional").fill(email);
-  await page.getByLabel("Senha").fill("local-demo-password");
+  await page.getByLabel("Senha").fill("e2e-local-password-2026");
   await page.getByRole("button", { name: "Entrar no Hub" }).click({ force: true });
   await expect(page).toHaveURL(/\/$/, { timeout: 15000 });
-  await expect(page.getByRole("heading", { name: expectedHeading })).toBeVisible();
+  await expect(page.getByRole("heading", { name: expectedHeading })).toBeVisible({ timeout: 15000 });
 }
 
 async function signIn(page: import("@playwright/test").Page): Promise<void> {
@@ -44,7 +44,7 @@ test.describe("operational hub journeys", () => {
     await userCreate.getByLabel("Setores gerenciados").fill("LABORATORY, RADIOLOGY");
     await userCreate.getByLabel("Senha inicial").fill("e2e-manager-password-123");
     await userCreate.getByLabel("Motivo da criação").fill("Delegação operacional para teste");
-    await userCreate.getByLabel("Senha do gestor para confirmar").fill("local-demo-password");
+    await userCreate.getByLabel("Senha do gestor para confirmar").fill("e2e-local-password-2026");
     await userCreate.getByLabel("Confirmo a criação deste acesso").check({ force: true });
     await userCreate.getByRole("button", { name: "Criar acesso" }).click({ force: true });
 
@@ -53,7 +53,7 @@ test.describe("operational hub journeys", () => {
     await expect(userRow.getByLabel("Setores gerenciados")).toHaveValue("LABORATORY, RADIOLOGY");
     await userRow.getByLabel("Setores gerenciados").fill("ULTRASOUND");
     await userRow.getByLabel("Motivo da alteração").fill("Revisão do escopo operacional");
-    await userRow.getByLabel("Senha para reautenticar").fill("local-demo-password");
+    await userRow.getByLabel("Senha para reautenticar").fill("e2e-local-password-2026");
     await userRow.getByLabel("Confirmo esta alteração de acesso").check({ force: true });
     await userRow.getByRole("button", { name: `Salvar ${email}` }).click({ force: true });
     await expect(userRow.getByLabel("Setores gerenciados")).toHaveValue("ULTRASOUND");
@@ -112,16 +112,16 @@ test.describe("operational hub journeys", () => {
     await userCreate.getByLabel("Setor").fill("LABORATORY");
     await userCreate.getByLabel("Senha inicial").fill("e2e-collaborator-123");
     await userCreate.getByLabel("Motivo da criação").fill("Teste operacional de provisionamento");
-    await userCreate.getByLabel("Senha do gestor para confirmar").fill("local-demo-password");
+    await userCreate.getByLabel("Senha do gestor para confirmar").fill("e2e-local-password-2026");
     await userCreate.getByLabel("Confirmo a criação deste acesso").check({ force: true });
     await userCreate.getByRole("button", { name: "Criar acesso" }).click({ force: true });
     const userRow = page.locator("#users .admin-row").filter({ hasText: email });
     await expect(userRow).toBeVisible();
     await userRow.getByLabel("Motivo da alteração").fill("Encerramento do teste operacional");
-    await userRow.getByLabel("Senha para reautenticar").fill("local-demo-password");
+    await userRow.getByLabel("Senha para reautenticar").fill("e2e-local-password-2026");
     await userRow.getByLabel("Confirmo esta alteração de acesso").check({ force: true });
     await userRow.getByRole("button", { name: "Desativar acesso" }).click({ force: true });
-    await expect(userRow).toContainText("Desativado");
+    await expect(userRow).toContainText("Desativado", { timeout: 15000 });
   });
 
   test("creates a contextual multi-service request through the UI", async ({ page }, testInfo) => {
@@ -182,7 +182,7 @@ test.describe("operational hub journeys", () => {
     await signIn(page);
     await expect(page.getByRole("heading", { name: /Bom dia/ })).toBeVisible();
     await page.getByRole("link", { name: /Abrir notificações/ }).click({ force: true });
-    await expect(page).toHaveURL(/notifications/);
+    await expect(page).toHaveURL(/notifications/, { timeout: 15000 });
     await expect(page.getByRole("heading", { name: /Notificações/ })).toBeVisible();
   });
 

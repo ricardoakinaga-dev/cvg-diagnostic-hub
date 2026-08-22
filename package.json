@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:postgres": "vitest run --config vitest.postgres.config.ts",
     "test:e2e": "playwright test",
     "test:accessibility": "playwright test tests/e2e/accessibility.spec.ts",
     "test:e2e:ui": "playwright test --ui",
@@ -25,7 +26,7 @@
     "db:restore:smoke": "bash scripts/backup-restore-smoke.sh",
     "storage:init": "tsx scripts/init-storage.ts",
     "validate:docs": "bash scripts/validate-docs.sh",
-    "validate:openapi": "node scripts/validate-openapi.mjs",
+    "validate:openapi": "redocly lint docs/api/openapi.json --extends=recommended && tsx scripts/validate-openapi.mjs",
     "security:scan": "bash scripts/secret-scan.sh",
     "validate": "npm run typecheck && npm run lint && npm run test:coverage"
   },
@@ -40,6 +41,7 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.10.2",
     "@playwright/test": "1.55.1",
+    "@redocly/cli": "2.47.0",
     "@testing-library/jest-dom": "^6.8.0",
     "@testing-library/react": "^16.3.0",
     "@types/node": "^22.15.0",
@@ -48,6 +50,8 @@
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.4.1",
     "@vitest/coverage-v8": "^3.2.4",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "eslint": "^9.25.0",
     "eslint-config-next": "16.3.0",
     "jsdom": "^26.1.0",

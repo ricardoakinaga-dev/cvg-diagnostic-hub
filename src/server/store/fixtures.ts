@@ -37,15 +37,34 @@ function demoUser(
   };
 }
 
-export function createDemoState(password = process.env.DEMO_PASSWORD ?? "local-demo-password"): StoreState {
+function resolveDemoPassword(password: string | undefined): string {
+  const configured = (password ?? process.env.DEMO_PASSWORD)?.trim();
+  if (configured) {
+    const isPlaceholder =
+      /^<.*>$/.test(configured) ||
+      /(local-demo-password|replace|configure|senha[-_ ]?sint[eé]tica)/i.test(configured);
+    if (
+      process.env.NODE_ENV !== "test" &&
+      (configured.length < 16 || isPlaceholder)
+    ) {
+      throw new Error("DEMO_PASSWORD deve ser uma senha sintética única com pelo menos 16 caracteres.");
+    }
+    return configured;
+  }
+  if (process.env.NODE_ENV === "test") return "test-only-demo-password";
+  throw new Error("DEMO_PASSWORD é obrigatório para criar dados sintéticos fora de testes.");
+}
+
+export function createDemoState(password?: string): StoreState {
+  const resolvedPassword = resolveDemoPassword(password);
   return {
     users: [
-      demoUser("user-vet", "vet@cvg.local", "Dra. Marina Costa", "VETERINARIAN", "INPATIENT", password, ["patient-thor", "patient-mel"]),
-      demoUser("user-lab", "lab@cvg.local", "Técnica Joana Lima", "LAB_TECH", "LABORATORY", password, [], ["HEMOGRAM", "CRP"]),
-      demoUser("user-rx", "rx@cvg.local", "Equipe Radiologia", "RADIOLOGY_TEAM", "RADIOLOGY", password, [], ["XRAY_THORAX"]),
-      demoUser("user-us", "us@cvg.local", "Equipe Ultrassom", "ULTRASOUND_TEAM", "ULTRASOUND", password, [], ["ULTRASOUND_ABDOMEN"]),
-      demoUser("user-manager", "manager@cvg.local", "Gestão Operacional", "MANAGER", "INPATIENT", password),
-      demoUser("user-admin", "admin@cvg.local", "Administração Técnica", "ADMIN", "IT", password)
+      demoUser("user-vet", "vet@cvg.local", "Dra. Marina Costa", "VETERINARIAN", "INPATIENT", resolvedPassword, ["patient-thor", "patient-mel"]),
+      demoUser("user-lab", "lab@cvg.local", "Técnica Joana Lima", "LAB_TECH", "LABORATORY", resolvedPassword, [], ["HEMOGRAM", "CRP"]),
+      demoUser("user-rx", "rx@cvg.local", "Equipe Radiologia", "RADIOLOGY_TEAM", "RADIOLOGY", resolvedPassword, [], ["XRAY_THORAX"]),
+      demoUser("user-us", "us@cvg.local", "Equipe Ultrassom", "ULTRASOUND_TEAM", "ULTRASOUND", resolvedPassword, [], ["ULTRASOUND_ABDOMEN"]),
+      demoUser("user-manager", "manager@cvg.local", "Gestão Operacional", "MANAGER", "INPATIENT", resolvedPassword),
+      demoUser("user-admin", "admin@cvg.local", "Administração Técnica", "ADMIN", "IT", resolvedPassword)
     ],
     sessions: [],
     patients: [

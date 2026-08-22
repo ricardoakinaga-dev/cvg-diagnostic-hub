@@ -15,6 +15,21 @@ function setup() {
 }
 
 describe("workflow commands", () => {
+  it("rejects a stale item version before creating a schedule", async () => {
+    const { service, vet, us, store } = setup();
+    const request = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-ultrasound" }] }, { idempotencyKey: "stale-schedule-request" });
+    const item = request.items[0];
+
+    await expect(service.scheduleProcedure(us, item.id, {
+      startsAt: "2026-08-26T10:00:00.000Z",
+      endsAt: "2026-08-26T10:30:00.000Z",
+      resource: "US-STALE",
+      expectedVersion: item.version + 1,
+      idempotencyKey: "stale-schedule"
+    })).rejects.toMatchObject({ code: "STALE_VERSION", status: 409 });
+    expect(store.getState().procedures).toHaveLength(0);
+  });
+
   it("schedules, reschedules, performs and reports an ultrasound without sample states", async () => {
     const { service, vet, us } = setup();
     const request = await service.createRequest(vet, {
@@ -28,6 +43,7 @@ describe("workflow commands", () => {
       startsAt: "2026-08-20T10:00:00.000Z",
       endsAt: "2026-08-20T10:30:00.000Z",
       resource: "US-01",
+      expectedVersion: item.version,
       idempotencyKey: "workflow-us-schedule"
     });
 
@@ -40,6 +56,7 @@ describe("workflow commands", () => {
       endsAt: "2026-08-20T11:30:00.000Z",
       resource: "US-01",
       reason: "Reorganização da agenda",
+      expectedVersion: scheduled.procedure.version,
       idempotencyKey: "workflow-us-reschedule"
     });
     expect(rescheduled.schedule.startsAt).toBe("2026-08-20T11:00:00.000Z");
@@ -57,8 +74,8 @@ describe("workflow commands", () => {
     const { service, vet, us, store } = setup();
     const first = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-ultrasound" }] }, { idempotencyKey: "schedule-first-request" });
     const second = await service.createRequest(vet, { patientId: "patient-mel", encounterId: "encounter-mel", priority: "ROUTINE", items: [{ serviceId: "service-ultrasound" }] }, { idempotencyKey: "schedule-second-request" });
-    await service.scheduleProcedure(us, first.items[0].id, { startsAt: "2026-08-21T10:00:00.000Z", endsAt: "2026-08-21T10:30:00.000Z", resource: "US-02", idempotencyKey: "schedule-first" });
-    await expect(service.scheduleProcedure(us, second.items[0].id, { startsAt: "2026-08-21T10:15:00.000Z", endsAt: "2026-08-21T10:45:00.000Z", resource: "US-02", idempotencyKey: "schedule-conflict" })).rejects.toMatchObject({ code: "SCHEDULE_CONFLICT", status: 409 });
+    await service.scheduleProcedure(us, first.items[0].id, { startsAt: "2026-08-21T10:00:00.000Z", endsAt: "2026-08-21T10:30:00.000Z", resource: "US-02", expectedVersion: first.items[0].version, idempotencyKey: "schedule-first" });
+    await expect(service.scheduleProcedure(us, second.items[0].id, { startsAt: "2026-08-21T10:15:00.000Z", endsAt: "2026-08-21T10:45:00.000Z", resource: "US-02", expectedVersion: second.items[0].version, idempotencyKey: "schedule-conflict" })).rejects.toMatchObject({ code: "SCHEDULE_CONFLICT", status: 409 });
 
     const cancelled = await service.cancelItem(vet, first.items[0].id, { reasonCode: "CLINICAL_DECISION", reason: "Paciente encaminhado para outra conduta", expectedVersion: 2, idempotencyKey: "schedule-cancel" });
     expect(cancelled.item.status).toBe("CANCELLED");
@@ -68,8 +85,8 @@ describe("workflow commands", () => {
   it("points the item at the pending replacement sample during recollection", async () => {
     const { service, vet, lab } = setup();
     const request = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-hemogram" }] }, { idempotencyKey: "recollection-context-request" });
-    const received = await service.receiveSample(lab, [request.items[0].id], { accessionCode: "ACC-RECOLLECTION-CONTEXT", sampleType: "EDTA", idempotencyKey: "recollection-context-receive" });
-    const recollection = await service.requestRecollection(lab, received.sample.id, { reasonCode: "HEMOLYZED", idempotencyKey: "recollection-context-requested" });
+    const received = await service.receiveSample(lab, [request.items[0].id], { accessionCode: "ACC-RECOLLECTION-CONTEXT", sampleType: "EDTA", expectedVersion: request.items[0].version, idempotencyKey: "recollection-context-receive" });
+    const recollection = await service.requestRecollection(lab, received.sample.id, { reasonCode: "HEMOLYZED", expectedVersion: received.items[0].version, idempotencyKey: "recollection-context-requested" });
 
     expect(recollection.items[0].currentSampleId).toBe(recollection.replacement.id);
     expect(recollection.replacement.status).toBe("EXPECTED");
@@ -79,11 +96,11 @@ describe("workflow commands", () => {
     const { service, vet, lab, manager, store } = setup();
     const request = await service.createRequest(vet, { patientId: "patient-thor", encounterId: "encounter-thor", priority: "ROUTINE", items: [{ serviceId: "service-hemogram" }] }, { idempotencyKey: "result-lifecycle-request" });
     const item = request.items[0];
-    const received = await service.receiveSample(lab, [item.id], { accessionCode: "ACC-RESULT-1", sampleType: "EDTA", idempotencyKey: "result-lifecycle-receive" });
+    const received = await service.receiveSample(lab, [item.id], { accessionCode: "ACC-RESULT-1", sampleType: "EDTA", expectedVersion: item.version, idempotencyKey: "result-lifecycle-receive" });
     await service.startProcessing(lab, item.id, { expectedVersion: received.items[0].version, idempotencyKey: "result-lifecycle-start" });
-    const draft = await service.createResultDraft(lab, item.id, { narrative: "Resultado inicial.", content: { value: 1 }, idempotencyKey: "result-lifecycle-draft" });
+    const draft = await service.createResultDraft(lab, item.id, { narrative: "Resultado inicial.", content: { value: 1 }, expectedVersion: received.items[0].version + 1, idempotencyKey: "result-lifecycle-draft" });
     const released = await service.releaseResult(lab, draft.result.id, { expectedVersion: draft.result.version, idempotencyKey: "result-lifecycle-release" });
-    await service.viewResult(vet, released.version.id, { idempotencyKey: "result-lifecycle-view" });
+    await service.viewResult(vet, released.version.id, { expectedVersion: released.item.version, idempotencyKey: "result-lifecycle-view" });
     const reviewed = await service.reviewResult(vet, released.result.id, { versionId: released.version.id, expectedVersion: released.item.version, idempotencyKey: "result-lifecycle-review" });
     await store.transaction((state) => ({ state: { ...state, users: state.users.map((user) => user.id === manager.id ? { ...user, managedDepartmentCodes: [] } : user) }, result: undefined }));
     const scopedManager = store.getState().users.find((user) => user.id === manager.id);
@@ -95,13 +112,13 @@ describe("workflow commands", () => {
     const completed = await service.completeItem(laboratoryManager, item.id, { expectedVersion: reviewed.item.version, idempotencyKey: "result-lifecycle-complete" });
     expect(completed.item.status).toBe("COMPLETED");
 
-    const amended = await service.amendResult(lab, released.result.id, { reason: "Correção de unidade", narrative: "Resultado corrigido.", content: { value: 2 }, idempotencyKey: "result-lifecycle-amend" });
+    const amended = await service.amendResult(lab, released.result.id, { reason: "Correção de unidade", narrative: "Resultado corrigido.", content: { value: 2 }, expectedVersion: reviewed.result.version, idempotencyKey: "result-lifecycle-amend" });
     expect(amended.version.status).toBe("DRAFT");
     expect(amended.item.status).toBe("RESULT_VOIDED");
     expect(amended.previousVersion.status).toBe("SUPERSEDED");
     const replacement = await service.releaseResult(lab, amended.result.id, { expectedVersion: amended.result.version, idempotencyKey: "result-lifecycle-release-replacement" });
     expect(replacement.version.sequence).toBe(2);
-    const voided = await service.voidResult(manager, replacement.result.id, { reason: "Revisão administrativa", expectedVersion: replacement.result.version, idempotencyKey: "result-lifecycle-void" });
+    const voided = await service.voidResult(laboratoryManager, replacement.result.id, { reason: "Revisão administrativa", expectedVersion: replacement.result.version, idempotencyKey: "result-lifecycle-void" });
     expect(voided.item.status).toBe("RESULT_VOIDED");
     expect(voided.version.status).toBe("VOIDED");
   });

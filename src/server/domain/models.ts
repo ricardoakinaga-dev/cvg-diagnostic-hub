@@ -262,6 +262,8 @@ export interface Attachment {
   checksum: string;
   scanStatus: "PENDING" | "CLEAN" | "QUARANTINED" | "FAILED";
   uploadStatus: "INITIATED" | "UPLOADED" | "FINALIZED";
+  uploadClaimToken?: string;
+  uploadClaimExpiresAt?: Timestamp;
   expiresAt?: Timestamp;
   createdBy: string;
   createdAt: Timestamp;
@@ -292,6 +294,7 @@ export interface StoreState {
 
 export interface StateStore {
   getState(): StoreState;
+  readState(): Promise<StoreState>;
   transaction<T>(operation: (state: StoreState) => Promise<{ state: StoreState; result: T }> | { state: StoreState; result: T }): Promise<T>;
   reset?(state: StoreState): Promise<void>;
   healthcheck?(): Promise<void>;
